@@ -43,4 +43,8 @@ pub enum VaultError {
     PotentialSybilAttack = 25,
     /// Sponsorship configuration error
     InvalidSponsorshipConfig = 26,
+    /// Migration or upgrade error
+    UpgradeError = 27,
+    /// Deposit not found
+    DepositNotFound = 28,
 }

@@ -17,6 +17,9 @@ mod events;
 mod nft;
 mod storage;
 mod types;
+mod upgrade;
+mod upgrade_validation;
+mod upgrade_rollback;
 
 // Prediction Market modules
 mod prediction_market;
@@ -35,7 +38,26 @@ pub use types::{
     SubscriptionExecution, SubscriptionStats, TaxLossHarvest, TokenDeposit, STORAGE_VERSION,
     MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER, MAX_TOKENS_PER_DEPOSIT,
 };
-pub use pq::{ML_DSA_PUBLIC_KEY_BYTES, ML_DSA_SIGNATURE_BYTES};
+
+pub use upgrade::{
+    init_migration, migrate_depositor_deposits, rollback_migration,
+    validate_deposits_for_migration, verify_migration_integrity,
+    MigrationState, ValidationResult, UpgradeMetadata,
+};
+
+pub use upgrade_validation::{
+    validate_all_deposits, validate_depositor_deposits, validate_single_deposit,
+    verify_consistency, can_migrate_deposit,
+    ValidationReport, DepositValidationDetail, ConsistencyCheckResult,
+};
+
+pub use upgrade_rollback::{
+    create_deposit_snapshot, create_depositor_snapshot,
+    rollback_all_deposits, rollback_depositor,
+    verify_rollback_integrity, can_safely_rollback,
+    conservative_rollback, full_rollback, targeted_rollback,
+    DepositSnapshot, RollbackState, RollbackStatus,
+};
 
 pub use contract::SafeHaven;
 pub use contract::SafeHavenClient;
@@ -48,3 +70,6 @@ pub use prediction_market_errors::PredictionMarketError;
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod upgrade_test;

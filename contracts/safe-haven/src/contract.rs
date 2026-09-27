@@ -3681,6 +3681,221 @@ impl SafeHaven {
         storage::get_nft_evolution_readonly(&env, &depositor, deposit_id)
             .map(|record| record.evolution_count)
     }
+
+    // ================================================================
+    //  Issue: Deposit Contract Upgrade Path
+    // ================================================================
+
+    /// Initialize a new migration to upgrade contract version.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin account initiating the upgrade
+    /// * `old_contract` - Current contract address
+    /// * `new_contract` - New contract address to migrate to
+    /// * `new_version` - Version string of new contract
+    ///
+    /// # Returns
+    /// Migration ID if successful
+    pub fn init_contract_migration(
+        env: Env,
+        admin: Address,
+        old_contract: Address,
+        new_contract: Address,
+        new_version: String,
+    ) -> Result<u32, VaultError> {
+        upgrade::init_migration(&env, &old_contract, &new_contract, &new_version)
+    }
+
+    /// Validate all deposits in the contract for migration readiness.
+    ///
+    /// Checks data integrity and ensures all deposits can be safely migrated.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin account requesting validation
+    ///
+    /// # Returns
+    /// Validation result with statistics and any errors found
+    pub fn validate_deposits_before_migration(
+        env: Env,
+        admin: Address,
+    ) -> Result<upgrade::ValidationResult, VaultError> {
+        upgrade::validate_deposits_for_migration(&env, None)
+    }
+
+    /// Migrate a specific depositor's deposits to the new contract.
+    ///
+    /// Transfers all deposits belonging to a depositor while verifying data integrity.
+    ///
+    /// # Arguments
+    /// * `depositor` - Address whose deposits to migrate
+    /// * `migration_id` - ID of the active migration
+    ///
+    /// # Returns
+    /// Number of successfully migrated deposits
+    pub fn migrate_deposits(
+        env: Env,
+        depositor: Address,
+        migration_id: u32,
+    ) -> Result<u32, VaultError> {
+        upgrade::migrate_depositor_deposits(&env, &depositor, migration_id)
+    }
+
+    /// Verify data integrity of deposits after migration.
+    ///
+    /// Re-validates that all deposit data is intact and consistent.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin account requesting verification
+    /// * `depositor` - Address to verify
+    /// * `migration_id` - ID of the active migration
+    ///
+    /// # Returns
+    /// Validation result confirming integrity
+    pub fn verify_migration_data_integrity(
+        env: Env,
+        admin: Address,
+        depositor: Address,
+        migration_id: u32,
+    ) -> Result<upgrade::ValidationResult, VaultError> {
+        upgrade::verify_migration_integrity(&env, &depositor, migration_id)
+    }
+
+    /// Rollback a failed migration to restore previous state.
+    ///
+    /// Clears upgrade metadata and allows retry with same or different new contract.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin account approving rollback
+    /// * `migration_id` - ID of migration to rollback
+    ///
+    /// # Returns
+    /// Success if rollback completed
+    pub fn rollback_deposit_migration(
+        env: Env,
+        admin: Address,
+        migration_id: u32,
+    ) -> Result<(), VaultError> {
+        upgrade::rollback_migration(&env, migration_id)
+    }
+
+    /// Get current upgrade status and metadata.
+    ///
+    /// # Returns
+    /// Upgrade entry if migration is in progress, None otherwise
+    pub fn get_migration_status(env: Env) -> Option<crate::types::UpgradeEntry> {
+        storage::get_upgrade(&env)
+    }
+
+    // ================================================================
+    //  Issue: Rollback Capability for Failed Upgrades
+    // ================================================================
+
+    /// Create a snapshot of all deposits before migration.
+    ///
+    /// Should be called before starting migration to preserve current state
+    /// for potential rollback.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin account initiating snapshot
+    /// * `migration_id` - ID of the planned migration
+    ///
+    /// # Returns
+    /// Snapshot ID for use in rollback if needed
+    pub fn create_migration_snapshot(
+        env: Env,
+        admin: Address,
+        migration_id: u32,
+    ) -> Result<u32, VaultError> {
+        upgrade_rollback::create_deposit_snapshot(&env, migration_id)
+    }
+
+    /// Perform rollback of failed migration for all deposits.
+    ///
+    /// Restores all deposits to the state captured in the snapshot.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin account approving rollback
+    /// * `migration_id` - Migration that failed
+    /// * `snapshot_id` - Snapshot to restore from
+    ///
+    /// # Returns
+    /// Number of deposits successfully restored
+    pub fn rollback_migration_all_deposits(
+        env: Env,
+        admin: Address,
+        migration_id: u32,
+        snapshot_id: u32,
+    ) -> Result<u32, VaultError> {
+        upgrade_rollback::rollback_all_deposits(&env, migration_id, snapshot_id)
+    }
+
+    /// Perform rollback of failed migration for a specific depositor.
+    ///
+    /// Targeted rollback approach for individual users.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin account approving rollback
+    /// * `migration_id` - Migration that failed
+    /// * `snapshot_id` - Snapshot to restore from
+    /// * `depositor` - Specific depositor to rollback
+    ///
+    /// # Returns
+    /// Number of deposits successfully restored
+    pub fn rollback_migration_depositor(
+        env: Env,
+        admin: Address,
+        migration_id: u32,
+        snapshot_id: u32,
+        depositor: Address,
+    ) -> Result<u32, VaultError> {
+        upgrade_rollback::rollback_depositor(&env, migration_id, snapshot_id, &depositor)
+    }
+
+    /// Verify rollback integrity after migration failure recovery.
+    ///
+    /// Confirms that all deposits match the snapshot state.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin account requesting verification
+    /// * `snapshot_id` - Snapshot to verify against
+    ///
+    /// # Returns
+    /// True if all deposits match snapshot state
+    pub fn verify_rollback_success(
+        env: Env,
+        admin: Address,
+        snapshot_id: u32,
+    ) -> Result<bool, VaultError> {
+        upgrade_rollback::verify_rollback_integrity(&env, snapshot_id)
+    }
+
+    /// Get current rollback status.
+    ///
+    /// # Returns
+    /// Current rollback state and statistics
+    pub fn get_rollback_status(env: Env) -> upgrade_rollback::RollbackState {
+        upgrade_rollback::get_rollback_state(&env)
+    }
+
+    /// Perform full rollback with safety checks and verification.
+    ///
+    /// Comprehensive rollback approach with integrity verification.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin account approving rollback
+    /// * `migration_id` - Migration that failed
+    /// * `snapshot_id` - Snapshot to restore from
+    ///
+    /// # Returns
+    /// Number of deposits successfully restored
+    pub fn full_migration_rollback(
+        env: Env,
+        admin: Address,
+        migration_id: u32,
+        snapshot_id: u32,
+    ) -> Result<u32, VaultError> {
+        upgrade_rollback::full_rollback(&env, migration_id, snapshot_id)
+    }
 }
 
 
