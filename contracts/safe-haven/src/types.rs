@@ -292,3 +292,37 @@ impl PermissionType {
         1u32 << (self as u32)
     }
 }
+
+// ----------------------------------------------------------------
+//  Batch Withdrawal
+// ----------------------------------------------------------------
+
+/// Result of withdrawing from a single deposit in a batch operation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawalResult {
+    /// The deposit ID that was attempted to withdraw from.
+    pub deposit_id: u32,
+    /// Whether this withdrawal succeeded (true) or failed (false).
+    pub success: bool,
+    /// Error code if failed (0 = success, non-zero = VaultError code).
+    pub error_code: u32,
+    /// Amount withdrawn if successful, 0 otherwise.
+    pub amount: i128,
+}
+
+/// Aggregated result of a batch withdrawal operation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchWithdrawalResult {
+    /// Individual results for each deposit ID in the batch.
+    pub results: Vec<WithdrawalResult>,
+    /// Total number of deposits attempted.
+    pub total_attempted: u32,
+    /// Number of successful withdrawals.
+    pub successful_count: u32,
+    /// Number of failed withdrawals.
+    pub failed_count: u32,
+    /// Total amount withdrawn across all successful withdrawals.
+    pub total_amount: i128,
+}
