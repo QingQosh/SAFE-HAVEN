@@ -15,6 +15,7 @@ mod contract;
 mod errors;
 mod events;
 mod nft;
+mod pq;
 mod storage;
 mod types;
 
@@ -33,7 +34,8 @@ pub use constants::{
 pub use types::{
     CircuitBreakerActivation, DepositSubscription, DepositType, MultiTokenVaultEntry, Page,
     SubscriptionExecution, SubscriptionStats, TaxLossHarvest, TokenDeposit, STORAGE_VERSION,
-    MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER, MAX_TOKENS_PER_DEPOSIT,
+    MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER, MAX_TOKENS_PER_DEPOSIT, BatchWithdrawalResult,
+    WithdrawalResult,
 };
 pub use pq::{ML_DSA_PUBLIC_KEY_BYTES, ML_DSA_SIGNATURE_BYTES};
 

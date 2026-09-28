@@ -43,4 +43,6 @@ pub enum VaultError {
     PotentialSybilAttack = 25,
     /// Sponsorship configuration error
     InvalidSponsorshipConfig = 26,
+    /// Batch size exceeds MAX_BATCH_SIZE
+    BatchSizeExceeded = 27,
 }

@@ -270,3 +270,19 @@ pub fn nft_evolved(
     env.events()
         .publish(topics, (deposit_id, old_stage, new_stage, rarity));
 }
+
+/// Emitted when a batch withdrawal operation completes.
+/// Tracks the aggregated results of withdrawing from multiple deposits.
+pub fn batch_withdraw(
+    env: &Env,
+    depositor: &Address,
+    successful_count: u32,
+    failed_count: u32,
+    total_amount: i128,
+) {
+    let topics = (Symbol::new(env, "batch_withdraw"), depositor.clone());
+    env.events().publish(
+        topics,
+        (successful_count, failed_count, total_amount),
+    );
+}
