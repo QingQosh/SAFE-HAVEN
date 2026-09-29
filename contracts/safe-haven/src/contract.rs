@@ -3,13 +3,19 @@
 //  Stellar Blockchain | Soroban SDK v22
 // ============================================================
 
-use soroban_sdk::{contract, contractimpl, token, Address, Env, Vec};
+use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
 
 use crate::{
-    constants::{MAX_BATCH_SIZE, MAX_DEPOSIT_AMOUNT, MAX_LOCK_DURATION_SECS, MIN_LOCK_DURATION_SECS},
+    constants::{
+        MAX_BATCH_SIZE, MAX_DEPOSIT_AMOUNT, MAX_LOCK_DURATION_SECS, MIN_LOCK_DURATION_SECS,
+        LOYALTY_SILVER_DEPOSITS, LOYALTY_GOLD_DEPOSITS, LOYALTY_PLATINUM_DEPOSITS,
+        LOYALTY_SILVER_VOLUME, LOYALTY_GOLD_VOLUME, LOYALTY_PLATINUM_VOLUME,
+        LOYALTY_SILVER_DISCOUNT_BPS, LOYALTY_GOLD_DISCOUNT_BPS, LOYALTY_PLATINUM_DISCOUNT_BPS,
+        LOYALTY_SILVER_BONUS_BPS, LOYALTY_GOLD_BONUS_BPS, LOYALTY_PLATINUM_BONUS_BPS,
+    },
     errors::VaultError,
     events, storage,
-    types::{VaultEntry, LedgerVaultEntry},
+    types::{LedgerVaultEntry, LoyaltyInfo, LoyaltyTier, TierBenefits, VaultEntry},
 };
 
 #[contract]
@@ -276,7 +282,10 @@ impl SafeHaven {
             let token_client = token::Client::new(&env, &entry.token);
             let contract = env.current_contract_address();
 
-            let penalty: i128 = (entry.amount * entry.penalty_bps as i128) / 10_000;
+            // Apply loyalty discount to the early-exit penalty
+            let effective_penalty_bps =
+                SafeHaven::apply_loyalty_discount(&env, &depositor, entry.penalty_bps);
+            let penalty: i128 = (entry.amount * effective_penalty_bps as i128) / 10_000;
             let refund = entry.amount - penalty;
 
             if penalty > 0 {
@@ -307,7 +316,10 @@ impl SafeHaven {
             let token_client = token::Client::new(&env, &entry.token);
             let contract = env.current_contract_address();
 
-            let penalty: i128 = (entry.amount * entry.penalty_bps as i128) / 10_000;
+            // Apply loyalty discount to the early-exit penalty
+            let effective_penalty_bps =
+                SafeHaven::apply_loyalty_discount(&env, &depositor, entry.penalty_bps);
+            let penalty: i128 = (entry.amount * effective_penalty_bps as i128) / 10_000;
             let refund = entry.amount - penalty;
 
             if penalty > 0 {
@@ -348,6 +360,7 @@ impl SafeHaven {
             let token_client = token::Client::new(&env, &entry.token);
             token_client.transfer(&env.current_contract_address(), &depositor, &entry.amount);
 
+            SafeHaven::record_loyalty_completion(&env, &depositor, entry.amount);
             events::withdraw(&env, &depositor, &entry.token, entry.amount, deposit_id);
             return Ok(());
         }
@@ -367,6 +380,7 @@ impl SafeHaven {
             let token_client = token::Client::new(&env, &entry.token);
             token_client.transfer(&env.current_contract_address(), &depositor, &entry.amount);
 
+            SafeHaven::record_loyalty_completion(&env, &depositor, entry.amount);
             events::withdraw(&env, &depositor, &entry.token, entry.amount, deposit_id);
             return Ok(());
         }
@@ -397,6 +411,7 @@ impl SafeHaven {
             let token_client = token::Client::new(&env, &entry.token);
             token_client.transfer(&env.current_contract_address(), &recipient, &entry.amount);
 
+            SafeHaven::record_loyalty_completion(&env, &depositor, entry.amount);
             events::withdraw_to(&env, &depositor, &recipient, &entry.token, entry.amount);
             return Ok(());
         }
@@ -416,6 +431,7 @@ impl SafeHaven {
             let token_client = token::Client::new(&env, &entry.token);
             token_client.transfer(&env.current_contract_address(), &recipient, &entry.amount);
 
+            SafeHaven::record_loyalty_completion(&env, &depositor, entry.amount);
             events::withdraw_to(&env, &depositor, &recipient, &entry.token, entry.amount);
             return Ok(());
         }
@@ -652,5 +668,148 @@ impl SafeHaven {
 
     pub fn is_initialized(env: Env) -> bool {
         storage::is_initialized(&env)
+    }
+
+    // ----------------------------------------------------------------
+    //  Loyalty Program — Queries
+    // ----------------------------------------------------------------
+
+    /// Returns the current `LoyaltyTier` and progress details for `depositor`.
+    /// No auth required — public read-only query.
+    ///
+    /// Tier rules (either condition qualifies for a tier):
+    ///   Bronze   — new user (default)
+    ///   Silver   — 3+ completed deposits OR 10,000+ total volume
+    ///   Gold     — 10+ completed deposits OR 100,000+ total volume
+    ///   Platinum — 25+ completed deposits OR 1,000,000+ total volume
+    pub fn get_loyalty_tier(env: Env, depositor: Address) -> LoyaltyInfo {
+        let completed = storage::get_loyalty_deposit_count(&env, &depositor);
+        let volume = storage::get_loyalty_volume(&env, &depositor);
+        let tier = SafeHaven::compute_tier(completed, volume);
+
+        // Progress to next tier
+        let (deposits_to_next, volume_to_next) = match tier {
+            LoyaltyTier::Bronze => (
+                LOYALTY_SILVER_DEPOSITS.saturating_sub(completed),
+                LOYALTY_SILVER_VOLUME.saturating_sub(volume),
+            ),
+            LoyaltyTier::Silver => (
+                LOYALTY_GOLD_DEPOSITS.saturating_sub(completed),
+                LOYALTY_GOLD_VOLUME.saturating_sub(volume),
+            ),
+            LoyaltyTier::Gold => (
+                LOYALTY_PLATINUM_DEPOSITS.saturating_sub(completed),
+                LOYALTY_PLATINUM_VOLUME.saturating_sub(volume),
+            ),
+            LoyaltyTier::Platinum => (0, 0),
+        };
+
+        LoyaltyInfo {
+            tier,
+            completed_deposits: completed,
+            total_volume: volume,
+            deposits_to_next_tier: deposits_to_next,
+            volume_to_next_tier: volume_to_next,
+        }
+    }
+
+    /// Returns the benefits associated with each tier.
+    /// Pass the desired `LoyaltyTier` variant to get its perks.
+    /// No auth required — public read-only query.
+    pub fn tier_benefits(env: Env, tier: LoyaltyTier) -> TierBenefits {
+        match tier {
+            LoyaltyTier::Bronze => TierBenefits {
+                tier: LoyaltyTier::Bronze,
+                fee_discount_bps: 0,
+                bonus_interest_bps: 0,
+                description: String::from_str(
+                    &env,
+                    "Bronze: No discount. Deposit to unlock Silver (3 deposits or 10,000 volume).",
+                ),
+            },
+            LoyaltyTier::Silver => TierBenefits {
+                tier: LoyaltyTier::Silver,
+                fee_discount_bps: LOYALTY_SILVER_DISCOUNT_BPS,
+                bonus_interest_bps: LOYALTY_SILVER_BONUS_BPS,
+                description: String::from_str(
+                    &env,
+                    "Silver: 5% early-exit fee discount + 0.25% bonus interest on matured withdrawals.",
+                ),
+            },
+            LoyaltyTier::Gold => TierBenefits {
+                tier: LoyaltyTier::Gold,
+                fee_discount_bps: LOYALTY_GOLD_DISCOUNT_BPS,
+                bonus_interest_bps: LOYALTY_GOLD_BONUS_BPS,
+                description: String::from_str(
+                    &env,
+                    "Gold: 10% early-exit fee discount + 0.75% bonus interest on matured withdrawals.",
+                ),
+            },
+            LoyaltyTier::Platinum => TierBenefits {
+                tier: LoyaltyTier::Platinum,
+                fee_discount_bps: LOYALTY_PLATINUM_DISCOUNT_BPS,
+                bonus_interest_bps: LOYALTY_PLATINUM_BONUS_BPS,
+                description: String::from_str(
+                    &env,
+                    "Platinum: 20% early-exit fee discount + 1.50% bonus interest on matured withdrawals.",
+                ),
+            },
+        }
+    }
+}
+
+// ----------------------------------------------------------------
+//  Loyalty Program — Private Helpers
+// ----------------------------------------------------------------
+
+impl SafeHaven {
+    /// Computes the tier purely from `completed_deposits` and `total_volume`.
+    /// Either condition (deposits OR volume) is sufficient to reach a tier.
+    fn compute_tier(completed_deposits: u32, total_volume: i128) -> LoyaltyTier {
+        if completed_deposits >= LOYALTY_PLATINUM_DEPOSITS || total_volume >= LOYALTY_PLATINUM_VOLUME {
+            return LoyaltyTier::Platinum;
+        }
+        if completed_deposits >= LOYALTY_GOLD_DEPOSITS || total_volume >= LOYALTY_GOLD_VOLUME {
+            return LoyaltyTier::Gold;
+        }
+        if completed_deposits >= LOYALTY_SILVER_DEPOSITS || total_volume >= LOYALTY_SILVER_VOLUME {
+            return LoyaltyTier::Silver;
+        }
+        LoyaltyTier::Bronze
+    }
+
+    /// Returns the fee discount in bps for the given tier.
+    fn tier_fee_discount(tier: LoyaltyTier) -> u32 {
+        match tier {
+            LoyaltyTier::Bronze => 0,
+            LoyaltyTier::Silver => LOYALTY_SILVER_DISCOUNT_BPS,
+            LoyaltyTier::Gold => LOYALTY_GOLD_DISCOUNT_BPS,
+            LoyaltyTier::Platinum => LOYALTY_PLATINUM_DISCOUNT_BPS,
+        }
+    }
+
+    /// Records a completed deposit for loyalty tracking, upgrades the stored
+    /// tier if warranted, and emits a `TierUpgraded` event on promotion.
+    fn record_loyalty_completion(env: &Env, depositor: &Address, amount: i128) {
+        let new_count = storage::increment_loyalty_deposit_count(env, depositor);
+        let new_volume = storage::add_loyalty_volume(env, depositor, amount);
+
+        let new_tier = SafeHaven::compute_tier(new_count, new_volume);
+        let old_tier = storage::get_stored_loyalty_tier(env, depositor);
+
+        if new_tier > old_tier {
+            storage::set_loyalty_tier(env, depositor, new_tier);
+            events::tier_upgraded(env, depositor, old_tier, new_tier, new_count, new_volume);
+        }
+    }
+
+    /// Applies the depositor's loyalty fee discount to `penalty_bps`, returning
+    /// the effective penalty. The discount reduces the penalty but never below 0.
+    fn apply_loyalty_discount(env: &Env, depositor: &Address, penalty_bps: u32) -> u32 {
+        let completed = storage::get_loyalty_deposit_count(env, depositor);
+        let volume = storage::get_loyalty_volume(env, depositor);
+        let tier = SafeHaven::compute_tier(completed, volume);
+        let discount = SafeHaven::tier_fee_discount(tier);
+        penalty_bps.saturating_sub(discount)
     }
 }

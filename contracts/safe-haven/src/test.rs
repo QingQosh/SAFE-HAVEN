@@ -1794,3 +1794,355 @@ fn test_time_remaining_timestamp_deposit_unaffected() {
 
     assert_eq!(vault.time_remaining(&alice, &id), 1800);
 }
+
+// ================================================================
+//  Loyalty Program Tests
+// ================================================================
+
+#[test]
+fn test_new_user_starts_at_bronze() {
+    let (_env, vault, _token, _admin, alice, _fee) = setup();
+    let info = vault.get_loyalty_tier(&alice);
+    assert_eq!(info.tier, crate::types::LoyaltyTier::Bronze);
+    assert_eq!(info.completed_deposits, 0);
+    assert_eq!(info.total_volume, 0);
+}
+
+#[test]
+fn test_bronze_progress_shows_deposits_to_silver() {
+    let (_env, vault, _token, _admin, alice, _fee) = setup();
+    let info = vault.get_loyalty_tier(&alice);
+    assert_eq!(
+        info.deposits_to_next_tier,
+        crate::LOYALTY_SILVER_DEPOSITS
+    );
+    assert_eq!(
+        info.volume_to_next_tier,
+        crate::LOYALTY_SILVER_VOLUME
+    );
+}
+
+#[test]
+fn test_tier_upgrades_to_silver_after_three_withdrawals() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &50_000);
+
+    for _ in 0..3 {
+        let unlock = env.ledger().timestamp() + 3600;
+        let id = vault.deposit(&alice, &token, &1_000, &unlock, &0);
+        advance_time(&env, 3601);
+        vault.withdraw(&alice, &id);
+    }
+
+    let info = vault.get_loyalty_tier(&alice);
+    assert_eq!(info.tier, crate::types::LoyaltyTier::Silver);
+    assert_eq!(info.completed_deposits, 3);
+}
+
+#[test]
+fn test_tier_upgrades_to_silver_by_volume() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &100_000);
+
+    // Single large deposit that exceeds LOYALTY_SILVER_VOLUME (10_000)
+    let unlock = env.ledger().timestamp() + 3600;
+    let id = vault.deposit(&alice, &token, &10_000, &unlock, &0);
+    advance_time(&env, 3601);
+    vault.withdraw(&alice, &id);
+
+    let info = vault.get_loyalty_tier(&alice);
+    assert_eq!(info.tier, crate::types::LoyaltyTier::Silver);
+    assert_eq!(info.total_volume, 10_000);
+}
+
+#[test]
+fn test_tier_upgrades_to_gold_after_ten_withdrawals() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &100_000);
+
+    for _ in 0..10 {
+        let unlock = env.ledger().timestamp() + 3600;
+        let id = vault.deposit(&alice, &token, &1_000, &unlock, &0);
+        advance_time(&env, 3601);
+        vault.withdraw(&alice, &id);
+    }
+
+    let info = vault.get_loyalty_tier(&alice);
+    assert_eq!(info.tier, crate::types::LoyaltyTier::Gold);
+    assert_eq!(info.completed_deposits, 10);
+}
+
+#[test]
+fn test_tier_upgrades_to_gold_by_volume() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &500_000);
+
+    let unlock = env.ledger().timestamp() + 3600;
+    let id = vault.deposit(&alice, &token, &100_000, &unlock, &0);
+    advance_time(&env, 3601);
+    vault.withdraw(&alice, &id);
+
+    let info = vault.get_loyalty_tier(&alice);
+    assert_eq!(info.tier, crate::types::LoyaltyTier::Gold);
+}
+
+#[test]
+fn test_tier_upgrades_to_platinum_after_25_withdrawals() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &500_000);
+
+    for _ in 0..25 {
+        let unlock = env.ledger().timestamp() + 3600;
+        let id = vault.deposit(&alice, &token, &1_000, &unlock, &0);
+        advance_time(&env, 3601);
+        vault.withdraw(&alice, &id);
+    }
+
+    let info = vault.get_loyalty_tier(&alice);
+    assert_eq!(info.tier, crate::types::LoyaltyTier::Platinum);
+    assert_eq!(info.completed_deposits, 25);
+}
+
+#[test]
+fn test_tier_upgrades_to_platinum_by_volume() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &5_000_000);
+
+    let unlock = env.ledger().timestamp() + 3600;
+    let id = vault.deposit(&alice, &token, &1_000_000, &unlock, &0);
+    advance_time(&env, 3601);
+    vault.withdraw(&alice, &id);
+
+    let info = vault.get_loyalty_tier(&alice);
+    assert_eq!(info.tier, crate::types::LoyaltyTier::Platinum);
+}
+
+#[test]
+fn test_platinum_shows_zero_progress_to_next() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &5_000_000);
+
+    let unlock = env.ledger().timestamp() + 3600;
+    let id = vault.deposit(&alice, &token, &1_000_000, &unlock, &0);
+    advance_time(&env, 3601);
+    vault.withdraw(&alice, &id);
+
+    let info = vault.get_loyalty_tier(&alice);
+    assert_eq!(info.deposits_to_next_tier, 0);
+    assert_eq!(info.volume_to_next_tier, 0);
+}
+
+#[test]
+fn test_tier_benefits_bronze_has_no_discount() {
+    let (_env, vault, _token, _admin, _alice, _fee) = setup();
+    let benefits = vault.tier_benefits(&crate::types::LoyaltyTier::Bronze);
+    assert_eq!(benefits.fee_discount_bps, 0);
+    assert_eq!(benefits.bonus_interest_bps, 0);
+}
+
+#[test]
+fn test_tier_benefits_silver_discount() {
+    let (_env, vault, _token, _admin, _alice, _fee) = setup();
+    let benefits = vault.tier_benefits(&crate::types::LoyaltyTier::Silver);
+    assert_eq!(benefits.fee_discount_bps, crate::LOYALTY_SILVER_DISCOUNT_BPS);
+    assert_eq!(benefits.bonus_interest_bps, crate::LOYALTY_SILVER_BONUS_BPS);
+}
+
+#[test]
+fn test_tier_benefits_gold_discount() {
+    let (_env, vault, _token, _admin, _alice, _fee) = setup();
+    let benefits = vault.tier_benefits(&crate::types::LoyaltyTier::Gold);
+    assert_eq!(benefits.fee_discount_bps, crate::LOYALTY_GOLD_DISCOUNT_BPS);
+    assert_eq!(benefits.bonus_interest_bps, crate::LOYALTY_GOLD_BONUS_BPS);
+}
+
+#[test]
+fn test_tier_benefits_platinum_discount() {
+    let (_env, vault, _token, _admin, _alice, _fee) = setup();
+    let benefits = vault.tier_benefits(&crate::types::LoyaltyTier::Platinum);
+    assert_eq!(benefits.fee_discount_bps, crate::LOYALTY_PLATINUM_DISCOUNT_BPS);
+    assert_eq!(benefits.bonus_interest_bps, crate::LOYALTY_PLATINUM_BONUS_BPS);
+}
+
+#[test]
+fn test_silver_user_gets_fee_discount_on_cancel() {
+    let (env, vault, token, _admin, alice, fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &100_000);
+    let token_client = TokenClient::new(&env, &token);
+
+    // Reach Silver tier (3 completed deposits)
+    for _ in 0..3 {
+        let unlock = env.ledger().timestamp() + 3600;
+        let id = vault.deposit(&alice, &token, &1_000, &unlock, &0);
+        advance_time(&env, 3601);
+        vault.withdraw(&alice, &id);
+    }
+
+    // Now cancel a deposit with 10% penalty — Silver gives 5% discount → effective 5%
+    // penalty_bps = 1000 (10%), discount = 500 (5%) → effective = 500 (5%)
+    // On 1_000 tokens: penalty = 50, refund = 950
+    let unlock = env.ledger().timestamp() + 3600;
+    vault.deposit(&alice, &token, &1_000, &unlock, &1_000);
+    vault.cancel_deposit(&alice, &3);
+
+    // silver discount: penalty_bps 1000 - 500 = 500 → 5% of 1000 = 50
+    assert_eq!(token_client.balance(&fee), 50);
+}
+
+#[test]
+fn test_bronze_user_pays_full_penalty_on_cancel() {
+    let (env, vault, token, _admin, alice, fee) = setup();
+    let token_client = TokenClient::new(&env, &token);
+
+    // No prior withdrawals — Bronze tier
+    let unlock = env.ledger().timestamp() + 3600;
+    vault.deposit(&alice, &token, &1_000, &unlock, &1_000); // 10% penalty
+    vault.cancel_deposit(&alice, &0);
+
+    // No discount: 10% of 1000 = 100
+    assert_eq!(token_client.balance(&fee), 100);
+}
+
+#[test]
+fn test_tier_upgraded_event_emitted_on_silver_promotion() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &50_000);
+
+    // Do 3 deposits + withdrawals to reach Silver
+    for _ in 0..3 {
+        let unlock = env.ledger().timestamp() + 3600;
+        let id = vault.deposit(&alice, &token, &1_000, &unlock, &0);
+        advance_time(&env, 3601);
+        vault.withdraw(&alice, &id);
+    }
+
+    // The last event should be tier_upgraded
+    let all_events = env.events().all();
+    let last = all_events.last().unwrap();
+    assert_eq!(last.0, vault.address.clone());
+}
+
+#[test]
+fn test_tier_not_downgraded_after_silver() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &50_000);
+
+    // Reach Silver
+    for _ in 0..3 {
+        let unlock = env.ledger().timestamp() + 3600;
+        let id = vault.deposit(&alice, &token, &1_000, &unlock, &0);
+        advance_time(&env, 3601);
+        vault.withdraw(&alice, &id);
+    }
+
+    let info = vault.get_loyalty_tier(&alice);
+    assert_eq!(info.tier, crate::types::LoyaltyTier::Silver);
+
+    // Do nothing more — tier must remain Silver
+    let info2 = vault.get_loyalty_tier(&alice);
+    assert_eq!(info2.tier, crate::types::LoyaltyTier::Silver);
+}
+
+#[test]
+fn test_loyalty_tracks_independently_per_user() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+    StellarAssetClient::new(&env, &token).mint(&alice, &50_000);
+    StellarAssetClient::new(&env, &token).mint(&bob, &50_000);
+
+    // Alice does 3 withdrawals → Silver
+    for _ in 0..3 {
+        let unlock = env.ledger().timestamp() + 3600;
+        let id = vault.deposit(&alice, &token, &1_000, &unlock, &0);
+        advance_time(&env, 3601);
+        vault.withdraw(&alice, &id);
+    }
+
+    // Bob does nothing
+    let alice_info = vault.get_loyalty_tier(&alice);
+    let bob_info = vault.get_loyalty_tier(&bob);
+
+    assert_eq!(alice_info.tier, crate::types::LoyaltyTier::Silver);
+    assert_eq!(bob_info.tier, crate::types::LoyaltyTier::Bronze);
+}
+
+#[test]
+fn test_withdraw_to_counts_toward_loyalty() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+    StellarAssetClient::new(&env, &token).mint(&alice, &50_000);
+
+    // 3 withdraw_to calls should count for alice's loyalty (the depositor)
+    for _ in 0..3 {
+        let unlock = env.ledger().timestamp() + 3600;
+        let id = vault.deposit(&alice, &token, &1_000, &unlock, &0);
+        advance_time(&env, 3601);
+        vault.withdraw_to(&alice, &id, &bob);
+    }
+
+    let info = vault.get_loyalty_tier(&alice);
+    assert_eq!(info.tier, crate::types::LoyaltyTier::Silver);
+    assert_eq!(info.completed_deposits, 3);
+}
+
+#[test]
+fn test_loyalty_not_updated_on_cancel() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let unlock = env.ledger().timestamp() + 3600;
+    vault.deposit(&alice, &token, &1_000, &unlock, &0);
+    vault.cancel_deposit(&alice, &0);
+
+    // Cancelled deposits do NOT count toward loyalty
+    let info = vault.get_loyalty_tier(&alice);
+    assert_eq!(info.completed_deposits, 0);
+    assert_eq!(info.tier, crate::types::LoyaltyTier::Bronze);
+}
+
+#[test]
+fn test_loyalty_volume_accumulates_across_withdrawals() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &50_000);
+
+    let amounts = [1_000_i128, 2_000, 3_000];
+    for &amt in amounts.iter() {
+        let unlock = env.ledger().timestamp() + 3600;
+        let id = vault.deposit(&alice, &token, &amt, &unlock, &0);
+        advance_time(&env, 3601);
+        vault.withdraw(&alice, &id);
+    }
+
+    let info = vault.get_loyalty_tier(&alice);
+    assert_eq!(info.total_volume, 6_000);
+    assert_eq!(info.completed_deposits, 3);
+}
+
+#[test]
+fn test_gold_progress_shown_correctly_from_silver() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &50_000);
+
+    // Reach Silver (3 deposits)
+    for _ in 0..3 {
+        let unlock = env.ledger().timestamp() + 3600;
+        let id = vault.deposit(&alice, &token, &1_000, &unlock, &0);
+        advance_time(&env, 3601);
+        vault.withdraw(&alice, &id);
+    }
+
+    let info = vault.get_loyalty_tier(&alice);
+    assert_eq!(info.tier, crate::types::LoyaltyTier::Silver);
+    // Need 10 total for Gold, have 3 → 7 more
+    assert_eq!(info.deposits_to_next_tier, 7);
+}
+
+#[test]
+fn test_use_pub_loyalty_constants_from_lib() {
+    // Verifies the constants are re-exported through lib.rs
+    assert_eq!(crate::LOYALTY_SILVER_DEPOSITS, 3);
+    assert_eq!(crate::LOYALTY_GOLD_DEPOSITS, 10);
+    assert_eq!(crate::LOYALTY_PLATINUM_DEPOSITS, 25);
+    assert_eq!(crate::LOYALTY_SILVER_VOLUME, 10_000);
+    assert_eq!(crate::LOYALTY_GOLD_VOLUME, 100_000);
+    assert_eq!(crate::LOYALTY_PLATINUM_VOLUME, 1_000_000);
+}

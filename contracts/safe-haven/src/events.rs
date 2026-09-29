@@ -1,5 +1,7 @@
 use soroban_sdk::{symbol_short, Address, Env, Symbol};
 
+use crate::types::LoyaltyTier;
+
 pub fn contract_initialized(
     env: &Env,
     admin: &Address,
@@ -107,4 +109,23 @@ pub fn withdraw_to(
 ) {
     let topics = (Symbol::new(env, "withdraw_to"), depositor.clone(), token.clone());
     env.events().publish(topics, (recipient.clone(), amount));
+}
+
+// ----------------------------------------------------------------
+//  Loyalty Program Events
+// ----------------------------------------------------------------
+
+/// Emitted when a user's loyalty tier is upgraded.
+/// `old_tier` and `new_tier` are the u32 discriminants of `LoyaltyTier`.
+pub fn tier_upgraded(
+    env: &Env,
+    depositor: &Address,
+    old_tier: LoyaltyTier,
+    new_tier: LoyaltyTier,
+    completed_deposits: u32,
+    total_volume: i128,
+) {
+    let topics = (Symbol::new(env, "tier_upgraded"), depositor.clone());
+    env.events()
+        .publish(topics, (old_tier as u32, new_tier as u32, completed_deposits, total_volume));
 }

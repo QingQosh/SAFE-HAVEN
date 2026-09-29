@@ -1,6 +1,6 @@
 use soroban_sdk::{Address, Env, Vec};
 
-use crate::types::{VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS};
+use crate::types::{LoyaltyTier, VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS};
 
 // Number of seconds per ledger — Soroban ledgers are ~5 seconds apart.
 pub const LEDGER_SECONDS: u64 = 5;
@@ -336,5 +336,68 @@ pub fn require_admin(env: &Env, caller: &Address) -> Result<(), crate::errors::V
     match get_admin(env) {
         Some(ref stored) if stored == caller => Ok(()),
         _ => Err(crate::errors::VaultError::Unauthorized),
+    }
+}
+
+// ----------------------------------------------------------------
+//  Loyalty Program Storage Helpers
+// ----------------------------------------------------------------
+
+/// Increments the completed-deposit counter for `depositor` and returns
+/// the new value. Called after a successful `withdraw` or `withdraw_to`.
+pub fn increment_loyalty_deposit_count(env: &Env, depositor: &Address) -> u32 {
+    let key = VaultKey::LoyaltyDepositCount(depositor.clone());
+    let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+    let new_count = count.saturating_add(1);
+    env.storage().persistent().set(&key, &new_count);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+    new_count
+}
+
+/// Returns the completed-deposit count for `depositor` (0 for new users).
+pub fn get_loyalty_deposit_count(env: &Env, depositor: &Address) -> u32 {
+    let key = VaultKey::LoyaltyDepositCount(depositor.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+/// Adds `amount` to the cumulative deposit volume for `depositor` and returns
+/// the new total. Called after a successful `withdraw` or `withdraw_to`.
+pub fn add_loyalty_volume(env: &Env, depositor: &Address, amount: i128) -> i128 {
+    let key = VaultKey::LoyaltyTotalVolume(depositor.clone());
+    let volume: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+    let new_volume = volume.saturating_add(amount);
+    env.storage().persistent().set(&key, &new_volume);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+    new_volume
+}
+
+/// Returns the cumulative deposit volume for `depositor` (0 for new users).
+pub fn get_loyalty_volume(env: &Env, depositor: &Address) -> i128 {
+    let key = VaultKey::LoyaltyTotalVolume(depositor.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+/// Persists the current tier for `depositor`. Used to detect upgrades.
+pub fn set_loyalty_tier(env: &Env, depositor: &Address, tier: LoyaltyTier) {
+    let key = VaultKey::LoyaltyCurrentTier(depositor.clone());
+    env.storage().persistent().set(&key, &(tier as u32));
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Returns the stored tier for `depositor`, defaulting to `Bronze`.
+pub fn get_stored_loyalty_tier(env: &Env, depositor: &Address) -> LoyaltyTier {
+    let key = VaultKey::LoyaltyCurrentTier(depositor.clone());
+    let raw: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+    match raw {
+        1 => LoyaltyTier::Silver,
+        2 => LoyaltyTier::Gold,
+        3 => LoyaltyTier::Platinum,
+        _ => LoyaltyTier::Bronze,
     }
 }
