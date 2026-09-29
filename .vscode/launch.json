@@ -1,0 +1,60 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug Rust Tests (safe-haven)",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--features=testutils",
+                    "--manifest-path=contracts/safe-haven/Cargo.toml"
+                ],
+                "filter": {
+                    "name": "safe_haven",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "RUST_BACKTRACE": "1"
+            }
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug Specific Rust Test",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--features=testutils",
+                    "--manifest-path=contracts/safe-haven/Cargo.toml"
+                ],
+                "filter": {
+                    "name": "safe_haven",
+                    "kind": "lib"
+                }
+            },
+            "args": [
+                "--",
+                "${input:testName}"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "RUST_BACKTRACE": "1"
+            }
+        }
+    ],
+    "inputs": [
+        {
+            "id": "testName",
+            "type": "promptString",
+            "description": "Name of the test function to debug (e.g., test_deposit_success)",
+            "default": ""
+        }
+    ]
+}

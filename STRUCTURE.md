@@ -10,7 +10,7 @@ SAFE-HAVEN/
 │       └── src/
 │           ├── lib.rs          # Crate root
 │           ├── contract.rs     # All public entry points
-│           ├── types.rs        # VaultKey, VaultEntry, constants
+│           ├── types.rs        # VaultKey (incl. DepositByLedger), VaultEntry, LedgerVaultEntry, constants
 │           ├── errors.rs       # VaultError enum (12 codes)
 │           ├── events.rs       # Event emission helpers
 │           ├── storage.rs      # Persistent storage + TTL helpers
@@ -97,8 +97,9 @@ Freighter Wallet Extension
         ▼
 SAFE-HAVEN Contract (Soroban / Stellar)
         │
-        ├─ deposit()         → creates VaultEntry in persistent storage
-        ├─ withdraw()        → validates timestamp, removes entry, transfers tokens
-        ├─ cancel_deposit()  → early exit with configurable penalty
+        ├─ deposit()           → creates VaultEntry in persistent storage
+        ├─ deposit_by_ledger()  → creates LedgerVaultEntry keyed by ledger sequence
+        ├─ withdraw()          → validates timestamp/ledger, removes entry, transfers tokens
+        ├─ cancel_deposit()    → early exit with configurable penalty
         └─ emergency_withdraw() → admin-only recovery (funds → depositor)
 ```

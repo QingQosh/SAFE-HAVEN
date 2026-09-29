@@ -1,0 +1,43 @@
+# rustfmt configuration for SAFE-HAVEN
+# Applied by: cargo fmt --all
+# Checked in CI by: cargo fmt --all -- --check
+# Applied by pre-commit hook: .githooks/pre-commit
+
+edition = "2021"
+
+# ── Line length ──────────────────────────────────────────────────────────────
+# Keep lines readable in side-by-side diffs and terminal views.
+max_width = 100
+comment_width = 100
+wrap_comments = true
+
+# ── Imports ───────────────────────────────────────────────────────────────────
+# Group and sort imports automatically:
+#   1. std
+#   2. external crates (soroban_sdk, etc.)
+#   3. crate-local (crate::, super::, self::)
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
+
+# ── Trailing commas ───────────────────────────────────────────────────────────
+# Always add a trailing comma in multi-line constructs so diffs stay clean.
+trailing_comma = "Always"
+
+# ── Braces ────────────────────────────────────────────────────────────────────
+# Opening brace on the same line as the declaration.
+brace_style = "SameLineWhere"
+
+# ── Function arguments ────────────────────────────────────────────────────────
+# Compress short argument lists onto one line when they fit within max_width.
+fn_args_layout = "Tall"
+
+# ── Chains ────────────────────────────────────────────────────────────────────
+# Each chained call gets its own line when the chain is long.
+chain_width = 60
+
+# ── Match arms ────────────────────────────────────────────────────────────────
+match_block_trailing_comma = true
+
+# ── Blank lines ───────────────────────────────────────────────────────────────
+# At most one consecutive blank line inside a function body.
+blank_lines_upper_bound = 1

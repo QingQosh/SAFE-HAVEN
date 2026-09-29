@@ -1,3 +1,9 @@
+# ── IMPORTANT ──────────────────────────────────────────────
+# These entries are only enforced when the listed owners are
+# active GitHub users with write access. If you change the
+# maintainers below, verify the usernames are correct.
+# ───────────────────────────────────────────────────────────
+
 # Default owner for all files
 * @kenedybok3
 

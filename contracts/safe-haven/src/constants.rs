@@ -2,6 +2,8 @@
 //  Protocol Constants
 // ----------------------------------------------------------------
 
+use crate::storage::LEDGER_SECONDS;
+
 /// Maximum deposit amount (in stroops or token base units).
 pub const MAX_DEPOSIT_AMOUNT: i128 = 1_000_000_000_000_000;
 
@@ -11,6 +13,12 @@ pub const MAX_LOCK_DURATION_SECS: u64 = 157_788_000;
 /// Minimum lock duration: prevent trivial, pointless vaults that waste storage.
 pub const MIN_LOCK_DURATION_SECS: u64 = 60;
 
+/// Minimum number of ledgers required for a ledger-based deposit.
+pub const MIN_LOCK_LEDGERS: u32 = (MIN_LOCK_DURATION_SECS / LEDGER_SECONDS) as u32;
+
+pub const UPGRADE_TIMELOCK_SECS: u64 = 14 * 24 * 60 * 60;
+pub const MIN_UPGRADE_APPROVALS: u32 = 3;
+
 /// Maximum depositors per `batch_emergency_withdraw` call.
 ///
 /// Soroban's per-transaction instruction budget is ~100M instructions.
@@ -19,34 +27,24 @@ pub const MIN_LOCK_DURATION_SECS: u64 = 60;
 /// 25 leaves comfortable headroom for the common migration use-case.
 pub const MAX_BATCH_SIZE: u32 = 25;
 
-// ----------------------------------------------------------------
-//  Loyalty Program Constants
-// ----------------------------------------------------------------
+/// Staker penalty split: percentage of penalties allocated to stakers (70% = 7000 basis points)
+pub const STAKER_PENALTY_BPS: u32 = 7_000;
 
-/// Minimum completed deposits to reach Silver tier.
-pub const LOYALTY_SILVER_DEPOSITS: u32 = 3;
-/// Minimum completed deposits to reach Gold tier.
-pub const LOYALTY_GOLD_DEPOSITS: u32 = 10;
-/// Minimum completed deposits to reach Platinum tier.
-pub const LOYALTY_PLATINUM_DEPOSITS: u32 = 25;
+/// Fee recipient penalty split: percentage of penalties allocated to fee recipient (30% = 3000 basis points)
+pub const FEE_RECIPIENT_PENALTY_BPS: u32 = 3_000;
 
-/// Minimum cumulative volume (token base units) to reach Silver tier.
-pub const LOYALTY_SILVER_VOLUME: i128 = 10_000;
-/// Minimum cumulative volume to reach Gold tier.
-pub const LOYALTY_GOLD_VOLUME: i128 = 100_000;
-/// Minimum cumulative volume to reach Platinum tier.
-pub const LOYALTY_PLATINUM_VOLUME: i128 = 1_000_000;
+// ================================================================
+// MEV PROTECTION CONSTANTS
+// ================================================================
 
-/// Fee discount (in basis points) applied to `penalty_bps` for Silver users.
-pub const LOYALTY_SILVER_DISCOUNT_BPS: u32 = 500;   // 5%
-/// Fee discount for Gold users.
-pub const LOYALTY_GOLD_DISCOUNT_BPS: u32 = 1_000;   // 10%
-/// Fee discount for Platinum users.
-pub const LOYALTY_PLATINUM_DISCOUNT_BPS: u32 = 2_000; // 20%
+/// Reveal window: how long (in seconds) a depositor has to reveal after commit (30 minutes)
+pub const MEV_REVEAL_WINDOW_SECS: u64 = 1_800;
 
-/// Bonus interest (in basis points) credited as informational metadata for Silver.
-pub const LOYALTY_SILVER_BONUS_BPS: u32 = 25;   // 0.25%
-/// Bonus interest for Gold.
-pub const LOYALTY_GOLD_BONUS_BPS: u32 = 75;     // 0.75%
-/// Bonus interest for Platinum.
-pub const LOYALTY_PLATINUM_BONUS_BPS: u32 = 150; // 1.50%
+/// Price deviation threshold in basis points (2% = 200 bps) for MEV detection
+pub const MEV_PRICE_DEVIATION_THRESHOLD_BPS: u32 = 200;
+
+/// Baseline renewable energy percentage for deposits (default 50%)
+pub const RENEWABLE_ENERGY_BASELINE: u32 = 50;
+
+/// Carbon baseline: grams CO2e per unit per second (1 gram per unit-second)
+pub const CARBON_BASELINE_PER_UNIT_SECOND: i128 = 1;

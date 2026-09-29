@@ -14,6 +14,14 @@ Describe how the changes were tested. Include commands, test suites, or manual s
 
 Note any changes that may break existing behavior or require migrations.
 
+## Documentation
+
+- [ ] `CHANGELOG.md` updated under `[Unreleased]`
+- [ ] `docs/API.md` updated if contract API changed
+- [ ] `README.md` updated if usage or setup changed
+- [ ] New public functions/types have doc comments (`///`)
+- [ ] Migration guide added if breaking change
+
 ## Checklist
 
 - [ ] My code follows the project style guide

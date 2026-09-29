@@ -1,0 +1,226 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+# ----------------------------------------------------------------
+#  Shared env – mirrors ci.yml so tool versions stay in sync
+# ----------------------------------------------------------------
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ----------------------------------------------------------------
+  #  Doc Lint — every PR targeting main or develop
+  # ----------------------------------------------------------------
+  doc-lint:
+    name: Doc Lint
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Fetch enough history to diff CHANGELOG.md against the base branch
+          fetch-depth: 0
+
+      # ----------------------------------------------------------
+      #  1. CHANGELOG check
+      #     Warn (non-fatal) if the PR touches non-docs files but
+      #     the [Unreleased] section of CHANGELOG.md is unchanged.
+      # ----------------------------------------------------------
+      - name: Check CHANGELOG.md updated
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "--- CHANGELOG check ---"
+
+          # Detect whether this PR changes only docs/CI files
+          CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          ONLY_DOCS=true
+          while IFS= read -r f; do
+            case "$f" in
+              docs/*|*.md|.github/workflows/docs.yml|.cspell.json) ;;
+              *) ONLY_DOCS=false; break ;;
+            esac
+          done <<< "$CHANGED"
+
+          if [ "$ONLY_DOCS" = "true" ]; then
+            echo "ℹ️  Only docs/CI files changed — CHANGELOG update not required."
+            exit 0
+          fi
+
+          # Check whether CHANGELOG.md itself was modified
+          if ! echo "$CHANGED" | grep -q "^CHANGELOG.md$"; then
+            echo "⚠️  WARNING: Non-docs files changed but CHANGELOG.md was not updated."
+            echo "    Please add an entry under [Unreleased] in CHANGELOG.md."
+            # Non-fatal: emit warning but do not fail the job
+            exit 0
+          fi
+
+          # Verify the [Unreleased] section was actually modified (not just another section)
+          if ! git diff "$BASE_SHA" "$HEAD_SHA" -- CHANGELOG.md \
+               | grep -q '^\+.*\[Unreleased\]\|^\+.*###\|^\+.*-'; then
+            echo "⚠️  WARNING: CHANGELOG.md was touched but [Unreleased] section appears unchanged."
+            echo "    Make sure your entry appears under ## [Unreleased]."
+            exit 0
+          fi
+
+          echo "✅ CHANGELOG.md updated."
+
+      # ----------------------------------------------------------
+      #  2. Spell check
+      # ----------------------------------------------------------
+      - name: Install cspell
+        run: npm install -g cspell@8
+
+      - name: Run spell check
+        run: |
+          npx cspell \
+            "docs/**/*.md" \
+            "README.md" \
+            "CHANGELOG.md" \
+            --config .cspell.json \
+            --no-progress \
+            --show-suggestions
+
+      # ----------------------------------------------------------
+      #  3. PR description — not just the default template
+      # ----------------------------------------------------------
+      - name: Check PR description is not default
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          echo "--- PR description check ---"
+
+          # Extract the Summary section content (everything after "## Summary" up to the next "##")
+          SUMMARY=$(echo "$PR_BODY" \
+            | awk '/^## Summary/{found=1; next} found && /^##/{exit} found{print}')
+
+          echo "Summary section:"
+          echo "$SUMMARY"
+
+          # Strip whitespace and count remaining characters
+          NON_WS=$(echo "$SUMMARY" | tr -d '[:space:]')
+          CHAR_COUNT=${#NON_WS}
+          echo "Non-whitespace character count in Summary: $CHAR_COUNT"
+
+          if [ "$CHAR_COUNT" -lt 50 ]; then
+            echo "ERROR: PR Summary section has fewer than 50 non-whitespace characters."
+            echo "Please replace the placeholder text with a real description of your changes."
+            exit 1
+          fi
+
+          echo "✅ PR description is sufficiently detailed."
+
+  # ----------------------------------------------------------------
+  #  Check doc / code sync — every PR
+  # ----------------------------------------------------------------
+  check-doc-code-sync:
+    name: Check Doc/Code Sync
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Verify public contract functions are documented in API.md
+        run: |
+          echo "--- Contract function / API.md sync check ---"
+          CONTRACT=contracts/safe-haven/src/contract.rs
+          API_DOC=docs/API.md
+
+          MISSING=0
+
+          # Extract every `pub fn` name from the contractimpl block.
+          # We use a simple grep; the heuristic is: pub fn <name>(
+          while IFS= read -r fn_name; do
+            if ! grep -q "$fn_name" "$API_DOC"; then
+              echo "⚠️  MISSING: public function '$fn_name' not found in $API_DOC"
+              MISSING=$((MISSING + 1))
+            fi
+          done < <(grep -oP '(?<=pub fn )\w+' "$CONTRACT")
+
+          if [ "$MISSING" -gt 0 ]; then
+            echo ""
+            echo "ERROR: $MISSING public function(s) are not documented in $API_DOC."
+            echo "Please add entries for the missing functions, or mark them internal with a"
+            echo "comment if they are not part of the public contract interface."
+            exit 1
+          fi
+
+          echo "✅ All public contract functions are present in $API_DOC."
+
+  # ----------------------------------------------------------------
+  #  Build Rust API docs — push to main only
+  # ----------------------------------------------------------------
+  rust-docs:
+    name: Build Rust API Docs
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Cache cargo registry
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-doc-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-doc-
+
+      - name: Build Rust docs
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+
+      # GitHub Pages requires the artifact to live at ./public
+      - name: Prepare Pages artifact
+        run: |
+          cp -r target/doc public
+          # Add a redirect from the root to the crate index
+          echo '<meta http-equiv="refresh" content="0; url=safe_haven/index.html">' \
+            > public/index.html
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  # ----------------------------------------------------------------
+  #  Deploy Rust API docs to GitHub Pages
+  #  Requires the "pages" environment to be configured in the repo
+  #  settings and the "Build and deployment" source set to
+  #  "GitHub Actions".
+  # ----------------------------------------------------------------
+  deploy-docs:
+    name: Deploy Docs to GitHub Pages
+    runs-on: ubuntu-latest
+    needs: [rust-docs]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

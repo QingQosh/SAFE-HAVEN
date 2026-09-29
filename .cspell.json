@@ -1,0 +1,47 @@
+{
+  "version": "0.2",
+  "language": "en",
+  "files": [
+    "**/*.md",
+    "**/*.ts",
+    "**/*.tsx",
+    "**/*.rs"
+  ],
+  "ignorePaths": [
+    "node_modules",
+    "target",
+    "*.lock",
+    "frontend/package-lock.json"
+  ],
+  "words": [
+    "soroban",
+    "stellar",
+    "testnet",
+    "mainnet",
+    "wasm",
+    "xlm",
+    "stroops",
+    "bps",
+    "sac",
+    "freighter",
+    "penaltybps",
+    "penaltyBps",
+    "depositor",
+    "vite",
+    "vitejs",
+    "unlocktime",
+    "locktime",
+    "cdylib",
+    "rlib",
+    "toml",
+    "rustup",
+    "clippy",
+    "rustfmt",
+    "geiger",
+    "Lumens",
+    "HODL",
+    "trustless",
+    "ramp",
+    "onramp"
+  ]
+}

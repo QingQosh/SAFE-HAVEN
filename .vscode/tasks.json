@@ -1,0 +1,122 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build Contract (WASM)",
+            "type": "shell",
+            "command": "make build",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Test Contract",
+            "type": "shell",
+            "command": "make test",
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Watch Tests (cargo-watch)",
+            "type": "shell",
+            "command": "make watch",
+            "group": {
+                "kind": "test"
+            },
+            "isBackground": true,
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Lint (Clippy)",
+            "type": "shell",
+            "command": "make lint",
+            "group": {
+                "kind": "build"
+            },
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Format Check",
+            "type": "shell",
+            "command": "make fmt-check",
+            "group": {
+                "kind": "build"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Full CI Check (fmt + lint + test + audit + deny)",
+            "type": "shell",
+            "command": "make check",
+            "group": {
+                "kind": "build"
+            },
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Smoke Test (Local Node)",
+            "type": "shell",
+            "command": "make smoke-test-local",
+            "group": {
+                "kind": "test"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Check WASM Size",
+            "type": "shell",
+            "command": "make check-wasm-size",
+            "group": {
+                "kind": "build"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        }
+    ]
+}

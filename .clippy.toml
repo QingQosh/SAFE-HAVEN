@@ -1,0 +1,17 @@
+# Clippy configuration for SAFE-HAVEN
+# Applied by: cargo clippy --all-targets --features testutils -- -D warnings
+#
+# Do not suppress lints here unless there is a documented reason.
+# Prefer inline #[allow(...)] with a comment on the specific site instead of
+# global suppression.
+
+# Maximum allowed function complexity (cyclomatic).
+# Soroban entry points can be complex — set a generous but finite limit.
+cognitive-complexity-threshold = 30
+
+# Warn when a function has more than this many lines (not enforced as error).
+too-many-lines-threshold = 80
+
+# Enforce that all public items have doc comments.
+# Set to false because not all storage helpers need user-facing docs.
+missing-docs-in-crate-items = false

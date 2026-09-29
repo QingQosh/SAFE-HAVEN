@@ -1,0 +1,29 @@
+#!/bin/bash
+# Pre-commit hook: catch formatting, lint, and type errors before they reach CI.
+#
+# Activate with:
+#   git config core.hooksPath .githooks
+#
+# To skip for a single commit (not recommended):
+#   git commit --no-verify
+
+set -euo pipefail
+
+# ── Rust ──────────────────────────────────────────────────────────────────────
+echo "==> [Rust] cargo fmt --all -- --check"
+cargo fmt --all -- --check
+
+echo "==> [Rust] cargo clippy --all-targets --features testutils -- -D warnings"
+cargo clippy --all-targets --features testutils -- -D warnings
+
+# ── Frontend ──────────────────────────────────────────────────────────────────
+# Only run if frontend files are staged to avoid slowing down pure Rust commits.
+if git diff --cached --name-only | grep -q '^frontend/'; then
+  echo "==> [Frontend] ESLint"
+  (cd frontend && npm run lint)
+
+  echo "==> [Frontend] TypeScript type check"
+  (cd frontend && npm run typecheck)
+fi
+
+echo "==> All pre-commit checks passed"

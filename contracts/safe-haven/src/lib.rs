@@ -14,19 +14,39 @@ mod constants;
 mod contract;
 mod errors;
 mod events;
+mod nft;
+mod pq;
 mod storage;
 mod types;
 
+// Prediction Market modules
+mod prediction_market;
+mod prediction_market_errors;
+mod prediction_market_events;
+mod prediction_market_storage;
+mod prediction_market_types;
+
 pub use constants::{
-    MAX_BATCH_SIZE, MAX_DEPOSIT_AMOUNT, MAX_LOCK_DURATION_SECS, MIN_LOCK_DURATION_SECS,
-    LOYALTY_SILVER_DEPOSITS, LOYALTY_GOLD_DEPOSITS, LOYALTY_PLATINUM_DEPOSITS,
-    LOYALTY_SILVER_VOLUME, LOYALTY_GOLD_VOLUME, LOYALTY_PLATINUM_VOLUME,
-    LOYALTY_SILVER_DISCOUNT_BPS, LOYALTY_GOLD_DISCOUNT_BPS, LOYALTY_PLATINUM_DISCOUNT_BPS,
-    LOYALTY_SILVER_BONUS_BPS, LOYALTY_GOLD_BONUS_BPS, LOYALTY_PLATINUM_BONUS_BPS,
+    EPOCH_SIZE_LEDGERS, MAX_BATCH_SIZE, MAX_DEPOSIT_AMOUNT, MAX_LOCK_DURATION_SECS,
+    MIN_LOCK_DURATION_SECS, WITHDRAWAL_LIMIT_PER_EPOCH,
 };
+
+pub use types::{
+    CircuitBreakerActivation, DepositSubscription, DepositType, MultiTokenVaultEntry, Page,
+    SubscriptionExecution, SubscriptionStats, TaxLossHarvest, TokenDeposit, STORAGE_VERSION,
+    MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER, MAX_TOKENS_PER_DEPOSIT, BatchWithdrawalResult,
+    WithdrawalResult,
+};
+pub use pq::{ML_DSA_PUBLIC_KEY_BYTES, ML_DSA_SIGNATURE_BYTES};
 
 pub use contract::SafeHaven;
 pub use contract::SafeHavenClient;
+
+// Prediction Market exports
+pub use prediction_market_types::{
+    PredictionMarket, MarketOutcome, Bet, MarketStatus, MarketConfig,
+};
+pub use prediction_market_errors::PredictionMarketError;
 
 #[cfg(test)]
 mod test;

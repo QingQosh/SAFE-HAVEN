@@ -1,5 +1,8 @@
 {
   "rust-analyzer.cargo.features": ["testutils"],
   "rust-analyzer.checkOnSave.command": "clippy",
-  "rust-analyzer.checkOnSave.extraArgs": ["--features", "testutils"]
+  "rust-analyzer.checkOnSave.extraArgs": [
+    "--features",
+    "testutils"
+  ]
 }
