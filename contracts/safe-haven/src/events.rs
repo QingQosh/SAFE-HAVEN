@@ -1,5 +1,7 @@
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
+use crate::types::LoyaltyTier;
+
 pub fn contract_initialized(
     env: &Env,
     admin: &Address,
