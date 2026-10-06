@@ -15,7 +15,7 @@ use crate::{
     types::{
         DepositType, MultiTokenVaultEntry, TokenDeposit, VaultEntry, LedgerVaultEntry, Page,
         STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT, MEVCommitment, MEVDetection, MEVStatus,
-        PriceSample, SustainabilityMetrics,
+        PriceSample, SustainabilityMetrics, BatchWithdrawalResult, WithdrawalResult,
     },
 };
 
@@ -2167,6 +2167,213 @@ impl SafeHaven {
     }
 
     // ----------------------------------------------------------------
+    //  Batch Withdrawal
+    // ----------------------------------------------------------------
+
+    /// Withdraw from multiple deposits in a single transaction.
+    ///
+    /// Attempts to withdraw from each deposit ID in the provided vector.
+    /// For each deposit, performs the same checks as a single `withdraw()` call:
+    /// - Verifies lock time/ledger has passed
+    /// - Accrues any outstanding compound interest
+    /// - Removes deposit from storage
+    /// - Transfers tokens to depositor
+    ///
+    /// Deposits that cannot be withdrawn (locked, not found, etc.) are recorded
+    /// as failed in the result. This allows partial success: some deposits may
+    /// withdraw while others fail.
+    ///
+    /// # Parameters
+    /// - `depositor`: Account owner of the deposits (must sign the transaction)
+    /// - `deposit_ids`: Vector of deposit IDs to attempt withdrawal from
+    ///
+    /// # Returns
+    /// A `BatchWithdrawalResult` containing:
+    /// - Individual `WithdrawalResult` for each deposit (success/failure, error code, amount)
+    /// - Aggregate counts and total amount withdrawn
+    ///
+    /// # Constraints
+    /// - `deposit_ids.len()` must be ≤ `MAX_BATCH_SIZE` (25)
+    /// - Deposits exceeding `MAX_BATCH_SIZE` are rejected
+    ///
+    /// # Events
+    /// - Emits individual `withdraw` events for each successful withdrawal
+    /// - Emits a single `batch_withdraw` event with aggregate results
+    pub fn withdraw_batch(
+        env: Env,
+        depositor: Address,
+        deposit_ids: Vec<u32>,
+    ) -> Result<BatchWithdrawalResult, VaultError> {
+        depositor.require_auth();
+
+        if storage::is_emergency_lockdown(&env) {
+            return Err(VaultError::EmergencyLockdown);
+        }
+
+        // Check batch size limit
+        if deposit_ids.len() as u32 > MAX_BATCH_SIZE {
+            return Err(VaultError::BatchSizeExceeded);
+        }
+
+        let mut results: Vec<WithdrawalResult> = Vec::new(&env);
+        let mut successful_count: u32 = 0;
+        let mut failed_count: u32 = 0;
+        let mut total_amount: i128 = 0;
+
+        let total_attempted = deposit_ids.len() as u32;
+        let now = env.ledger().timestamp();
+        let current_ledger = env.ledger().sequence();
+        let contract_address = env.current_contract_address();
+
+        // Iterate through each deposit ID
+        for deposit_id in deposit_ids.iter() {
+            let mut success = false;
+            let mut error_code: u32 = 0;
+            let mut amount: i128 = 0;
+
+            // Try timestamp-based deposit first
+            if let Some(mut entry) = storage::get_deposit_readonly(&env, &depositor, deposit_id) {
+                if now < entry.unlock_time {
+                    error_code = VaultError::FundsStillLocked as u32;
+                } else {
+                    // Accrue any outstanding interest before computing the final payout
+                    if entry.compound_frequency_secs > 0 {
+                        entry.amount = compute_accrued_amount(
+                            entry.amount,
+                            entry.compound_frequency_secs,
+                            entry.last_accrual_timestamp,
+                            now,
+                        );
+                    }
+
+                    amount = entry.amount;
+                    total_amount = total_amount.saturating_add(amount);
+
+                    // Remove deposit from storage
+                    storage::remove_deposit(&env, &depositor, deposit_id);
+                    storage::remove_withdrawal_whitelist(&env, &depositor, deposit_id);
+                    if storage::get_deposit_ids(&env, &depositor).len() == 0 {
+                        storage::remove_depositor(&env, &depositor);
+                    }
+
+                    // Transfer tokens
+                    let token_client = token::Client::new(&env, &entry.token);
+                    token_client.transfer(&contract_address, &depositor, &amount);
+
+                    // Increment withdrawal count and clean up old epochs
+                    let current_epoch = storage::get_current_epoch(&env);
+                    storage::increment_withdrawal_count(&env, &depositor, current_epoch);
+                    storage::cleanup_old_epochs(&env, &depositor, current_epoch);
+
+                    // Emit individual withdrawal event
+                    events::withdraw(&env, &depositor, &entry.token, amount, deposit_id);
+
+                    // Clean up NFT evolution record and sustainability metrics
+                    storage::remove_nft_evolution(&env, &depositor, deposit_id);
+                    storage::remove_sustainability_metrics(&env, &depositor, deposit_id);
+
+                    success = true;
+                }
+            } else if let Some(entry) = storage::get_deposit_by_ledger_readonly(&env, &depositor, deposit_id) {
+                // Try ledger-based deposit
+                if current_ledger < entry.unlock_ledger {
+                    error_code = VaultError::FundsStillLocked as u32;
+                } else {
+                    amount = entry.amount;
+                    total_amount = total_amount.saturating_add(amount);
+
+                    // Remove deposit from storage
+                    storage::remove_deposit_by_ledger(&env, &depositor, deposit_id);
+                    storage::remove_withdrawal_whitelist(&env, &depositor, deposit_id);
+                    if storage::get_deposit_ids(&env, &depositor).len() == 0 {
+                        storage::remove_depositor(&env, &depositor);
+                    }
+
+                    // Transfer tokens
+                    let token_client = token::Client::new(&env, &entry.token);
+                    token_client.transfer(&contract_address, &depositor, &amount);
+
+                    // Increment withdrawal count and clean up old epochs
+                    let current_epoch = storage::get_current_epoch(&env);
+                    storage::increment_withdrawal_count(&env, &depositor, current_epoch);
+                    storage::cleanup_old_epochs(&env, &depositor, current_epoch);
+
+                    // Emit individual withdrawal event
+                    events::withdraw(&env, &depositor, &entry.token, amount, deposit_id);
+
+                    // Clean up NFT evolution record and sustainability metrics
+                    storage::remove_nft_evolution(&env, &depositor, deposit_id);
+                    storage::remove_sustainability_metrics(&env, &depositor, deposit_id);
+
+                    success = true;
+                }
+            } else if let Some(entry) = storage::get_multi_deposit_readonly(&env, &depositor, deposit_id) {
+                // Try multi-token deposit
+                if now < entry.unlock_time {
+                    error_code = VaultError::FundsStillLocked as u32;
+                } else {
+                    let token_count = entry.tokens.len();
+                    
+                    // Remove deposit from storage
+                    storage::remove_multi_deposit(&env, &depositor, deposit_id);
+                    storage::remove_withdrawal_whitelist(&env, &depositor, deposit_id);
+                    if storage::get_deposit_ids(&env, &depositor).len() == 0 {
+                        storage::remove_depositor(&env, &depositor);
+                    }
+
+                    // Transfer all tokens
+                    for td in entry.tokens.iter() {
+                        let token_client = token::Client::new(&env, &td.token);
+                        token_client.transfer(&contract_address, &depositor, &td.amount);
+                        amount = amount.saturating_add(td.amount);
+                        events::withdraw(&env, &depositor, &td.token, td.amount, deposit_id);
+                    }
+
+                    total_amount = total_amount.saturating_add(amount);
+
+                    // Increment withdrawal count and clean up old epochs
+                    let current_epoch = storage::get_current_epoch(&env);
+                    storage::increment_withdrawal_count(&env, &depositor, current_epoch);
+                    storage::cleanup_old_epochs(&env, &depositor, current_epoch);
+
+                    events::multi_withdraw(&env, &depositor, &depositor, deposit_id, token_count);
+
+                    success = true;
+                }
+            } else {
+                // Deposit not found
+                error_code = VaultError::NoDepositFound as u32;
+            }
+
+            // Record result
+            let result = WithdrawalResult {
+                deposit_id,
+                success,
+                error_code,
+                amount,
+            };
+            results.push(result);
+
+            if success {
+                successful_count += 1;
+            } else {
+                failed_count += 1;
+            }
+        }
+
+        // Emit batch withdrawal event
+        events::batch_withdraw(&env, &depositor, successful_count, failed_count, total_amount);
+
+        Ok(BatchWithdrawalResult {
+            results,
+            total_attempted,
+            successful_count,
+            failed_count,
+            total_amount,
+        })
+    }
+
+    // ----------------------------------------------------------------
     //  Admin: Emergency Withdrawal
     // ----------------------------------------------------------------
 
@@ -4087,5 +4294,148 @@ fn check_sustainability_milestones(
 
     if new_bitmap != bitmap {
         storage::set_milestone_bitmap(env, depositor, new_bitmap);
+    }
+
+    // ----------------------------------------------------------------
+    //  Loyalty Program — Queries
+    // ----------------------------------------------------------------
+
+    /// Returns the current `LoyaltyTier` and progress details for `depositor`.
+    /// No auth required — public read-only query.
+    ///
+    /// Tier rules (either condition qualifies for a tier):
+    ///   Bronze   — new user (default)
+    ///   Silver   — 3+ completed deposits OR 10,000+ total volume
+    ///   Gold     — 10+ completed deposits OR 100,000+ total volume
+    ///   Platinum — 25+ completed deposits OR 1,000,000+ total volume
+    pub fn get_loyalty_tier(env: Env, depositor: Address) -> LoyaltyInfo {
+        let completed = storage::get_loyalty_deposit_count(&env, &depositor);
+        let volume = storage::get_loyalty_volume(&env, &depositor);
+        let tier = SafeHaven::compute_tier(completed, volume);
+
+        // Progress to next tier
+        let (deposits_to_next, volume_to_next) = match tier {
+            LoyaltyTier::Bronze => (
+                LOYALTY_SILVER_DEPOSITS.saturating_sub(completed),
+                LOYALTY_SILVER_VOLUME.saturating_sub(volume),
+            ),
+            LoyaltyTier::Silver => (
+                LOYALTY_GOLD_DEPOSITS.saturating_sub(completed),
+                LOYALTY_GOLD_VOLUME.saturating_sub(volume),
+            ),
+            LoyaltyTier::Gold => (
+                LOYALTY_PLATINUM_DEPOSITS.saturating_sub(completed),
+                LOYALTY_PLATINUM_VOLUME.saturating_sub(volume),
+            ),
+            LoyaltyTier::Platinum => (0, 0),
+        };
+
+        LoyaltyInfo {
+            tier,
+            completed_deposits: completed,
+            total_volume: volume,
+            deposits_to_next_tier: deposits_to_next,
+            volume_to_next_tier: volume_to_next,
+        }
+    }
+
+    /// Returns the benefits associated with each tier.
+    /// Pass the desired `LoyaltyTier` variant to get its perks.
+    /// No auth required — public read-only query.
+    pub fn tier_benefits(env: Env, tier: LoyaltyTier) -> TierBenefits {
+        match tier {
+            LoyaltyTier::Bronze => TierBenefits {
+                tier: LoyaltyTier::Bronze,
+                fee_discount_bps: 0,
+                bonus_interest_bps: 0,
+                description: String::from_str(
+                    &env,
+                    "Bronze: No discount. Deposit to unlock Silver (3 deposits or 10,000 volume).",
+                ),
+            },
+            LoyaltyTier::Silver => TierBenefits {
+                tier: LoyaltyTier::Silver,
+                fee_discount_bps: LOYALTY_SILVER_DISCOUNT_BPS,
+                bonus_interest_bps: LOYALTY_SILVER_BONUS_BPS,
+                description: String::from_str(
+                    &env,
+                    "Silver: 5% early-exit fee discount + 0.25% bonus interest on matured withdrawals.",
+                ),
+            },
+            LoyaltyTier::Gold => TierBenefits {
+                tier: LoyaltyTier::Gold,
+                fee_discount_bps: LOYALTY_GOLD_DISCOUNT_BPS,
+                bonus_interest_bps: LOYALTY_GOLD_BONUS_BPS,
+                description: String::from_str(
+                    &env,
+                    "Gold: 10% early-exit fee discount + 0.75% bonus interest on matured withdrawals.",
+                ),
+            },
+            LoyaltyTier::Platinum => TierBenefits {
+                tier: LoyaltyTier::Platinum,
+                fee_discount_bps: LOYALTY_PLATINUM_DISCOUNT_BPS,
+                bonus_interest_bps: LOYALTY_PLATINUM_BONUS_BPS,
+                description: String::from_str(
+                    &env,
+                    "Platinum: 20% early-exit fee discount + 1.50% bonus interest on matured withdrawals.",
+                ),
+            },
+        }
+    }
+}
+
+// ----------------------------------------------------------------
+//  Loyalty Program — Private Helpers
+// ----------------------------------------------------------------
+
+impl SafeHaven {
+    /// Computes the tier purely from `completed_deposits` and `total_volume`.
+    /// Either condition (deposits OR volume) is sufficient to reach a tier.
+    fn compute_tier(completed_deposits: u32, total_volume: i128) -> LoyaltyTier {
+        if completed_deposits >= LOYALTY_PLATINUM_DEPOSITS || total_volume >= LOYALTY_PLATINUM_VOLUME {
+            return LoyaltyTier::Platinum;
+        }
+        if completed_deposits >= LOYALTY_GOLD_DEPOSITS || total_volume >= LOYALTY_GOLD_VOLUME {
+            return LoyaltyTier::Gold;
+        }
+        if completed_deposits >= LOYALTY_SILVER_DEPOSITS || total_volume >= LOYALTY_SILVER_VOLUME {
+            return LoyaltyTier::Silver;
+        }
+        LoyaltyTier::Bronze
+    }
+
+    /// Returns the fee discount in bps for the given tier.
+    fn tier_fee_discount(tier: LoyaltyTier) -> u32 {
+        match tier {
+            LoyaltyTier::Bronze => 0,
+            LoyaltyTier::Silver => LOYALTY_SILVER_DISCOUNT_BPS,
+            LoyaltyTier::Gold => LOYALTY_GOLD_DISCOUNT_BPS,
+            LoyaltyTier::Platinum => LOYALTY_PLATINUM_DISCOUNT_BPS,
+        }
+    }
+
+    /// Records a completed deposit for loyalty tracking, upgrades the stored
+    /// tier if warranted, and emits a `TierUpgraded` event on promotion.
+    fn record_loyalty_completion(env: &Env, depositor: &Address, amount: i128) {
+        let new_count = storage::increment_loyalty_deposit_count(env, depositor);
+        let new_volume = storage::add_loyalty_volume(env, depositor, amount);
+
+        let new_tier = SafeHaven::compute_tier(new_count, new_volume);
+        let old_tier = storage::get_stored_loyalty_tier(env, depositor);
+
+        if new_tier > old_tier {
+            storage::set_loyalty_tier(env, depositor, new_tier);
+            events::tier_upgraded(env, depositor, old_tier, new_tier, new_count, new_volume);
+        }
+    }
+
+    /// Applies the depositor's loyalty fee discount to `penalty_bps`, returning
+    /// the effective penalty. The discount reduces the penalty but never below 0.
+    fn apply_loyalty_discount(env: &Env, depositor: &Address, penalty_bps: u32) -> u32 {
+        let completed = storage::get_loyalty_deposit_count(env, depositor);
+        let volume = storage::get_loyalty_volume(env, depositor);
+        let tier = SafeHaven::compute_tier(completed, volume);
+        let discount = SafeHaven::tier_fee_discount(tier);
+        penalty_bps.saturating_sub(discount)
     }
 }
