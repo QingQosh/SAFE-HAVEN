@@ -14,11 +14,14 @@ use crate::prediction_market_types::*;
 // ================================================================
 
 /// Initialize the prediction market subsystem
-pub fn initialize_markets(
+///
+/// One-time setup that configures the admin, fee recipient and default fee.
+/// When `default_fee_bps` is `None`, `DEFAULT_FEE_BPS` (100 = 1%) is used.
+pub fn init_prediction_markets(
     env: &Env,
     admin: Address,
     fee_recipient: Address,
-    default_fee_bps: u32,
+    default_fee_bps: Option<u32>,
 ) -> Result<(), PredictionMarketError> {
     admin.require_auth();
 
@@ -28,6 +31,7 @@ pub fn initialize_markets(
     }
 
     // Validate fee
+    let default_fee_bps = default_fee_bps.unwrap_or(DEFAULT_FEE_BPS);
     if default_fee_bps > MAX_FEE_BPS {
         return Err(PredictionMarketError::InvalidFeeBps);
     }
@@ -44,6 +48,16 @@ pub fn initialize_markets(
     storage::set_market_config(env, &config);
     storage::set_pm_initialized(env);
     Ok(())
+}
+
+/// Backwards-compatible wrapper around [`init_prediction_markets`].
+pub fn initialize_markets(
+    env: &Env,
+    admin: Address,
+    fee_recipient: Address,
+    default_fee_bps: u32,
+) -> Result<(), PredictionMarketError> {
+    init_prediction_markets(env, admin, fee_recipient, Some(default_fee_bps))
 }
 
 // ================================================================
@@ -397,11 +411,12 @@ pub fn claim_winnings(
         return Err(PredictionMarketError::NoWinningBets);
     }
 
-    // Calculate fee
-    let fee = (winnings as u128)
-        .saturating_mul(market.fee_bps as u128)
+    // Calculate fee: payout_before_fee × (fee_bps / 10000)
+    let fee_u128 = (winnings as u128)
+        .checked_mul(market.fee_bps as u128)
+        .ok_or(PredictionMarketError::InvalidClaimAmount)?
         / 10_000;
-    let fee = fee as i128;
+    let fee = i128::try_from(fee_u128).map_err(|_| PredictionMarketError::InvalidClaimAmount)?;
 
     let payout = winnings.saturating_sub(fee);
 
@@ -413,11 +428,16 @@ pub fn claim_winnings(
     let token_client = token::Client::new(env, &token);
     token_client.transfer(&env.current_contract_address(), &bettor, &payout);
 
-    // Transfer fee to fee recipient
+    // Transfer fee to fee recipient and accumulate the total
     if fee > 0 {
         let config = storage::get_market_config(env)
             .ok_or(PredictionMarketError::InternalError)?;
         token_client.transfer(&env.current_contract_address(), &config.fee_recipient, &fee);
+
+        let total_fees = storage::get_total_fees(env).saturating_add(fee);
+        storage::set_total_fees(env, total_fees);
+
+        events::fee_collected(env, market_id, &config.fee_recipient, fee, total_fees);
     }
 
     events::winnings_claimed(env, market_id, &bettor, payout, fee);
@@ -461,9 +481,8 @@ pub fn cancel_market(
     market.status = MarketStatus::Cancelled;
     storage::set_market(env, &market);
 
-    let token_client = token::Client::new(env, &token);
-    
-    // Refund all bets (iterate through outcomes)
+    // Refund all bets (iterate through outcomes).
+    // Refunds return the full principal with no fee deduction.
     let mut total_refunded = 0i128;
     for outcome_id in 0..market.outcome_count {
         if let Some(outcome) = storage::get_outcome_readonly(env, market_id, outcome_id) {
@@ -508,6 +527,11 @@ pub fn set_market_paused(
 /// Get market details
 pub fn get_market_details(env: &Env, market_id: u32) -> Option<PredictionMarket> {
     storage::get_market_readonly(env, market_id)
+}
+
+/// Get the total fees accumulated across all claims
+pub fn get_total_fees(env: &Env) -> i128 {
+    storage::get_total_fees(env)
 }
 
 /// Get outcome details

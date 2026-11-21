@@ -516,3 +516,136 @@ fn test_deposit_id_counter_shared_across_deposit_types() {
     assert!(vault.get_ledger_vault(&alice, &1).is_some()); // ledger-based
     assert!(vault.get_vault(&alice, &2).is_some()); // timestamp-based
 }
+
+#[test]
+fn test_deposit_by_ledger_accepts_unlock_ledger() {
+    // The function accepts an unlock_ledger parameter and creates a deposit
+    let (env, vault, token, _admin, alice, _bob) = setup_deposit_id_tests();
+
+    let current_ledger = env.ledger().sequence();
+    let unlock_ledger = current_ledger + 100;
+
+    let id = vault.deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &0);
+
+    // Deposit ID is returned (first deposit for a new depositor)
+    assert_eq!(id, 0, "First ledger-based deposit should get ID=0");
+}
+
+#[test]
+fn test_deposit_by_ledger_stores_correct_ledger() {
+    // The created deposit stores the correct unlock_ledger value
+    let (env, vault, token, _admin, alice, _bob) = setup_deposit_id_tests();
+
+    let current_ledger = env.ledger().sequence();
+    let unlock_ledger = current_ledger + 500;
+
+    let id = vault.deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &0);
+
+    let deposit = vault
+        .get_ledger_vault(&alice, &id)
+        .expect("Ledger-based deposit should exist");
+
+    assert_eq!(
+        deposit.unlock_ledger, unlock_ledger,
+        "Stored unlock_ledger should match the provided value"
+    );
+    assert_eq!(deposit.amount, 1_000);
+    assert_eq!(deposit.depositor, alice);
+}
+
+#[test]
+fn test_deposit_by_ledger_id_increments_monotonically() {
+    // Multiple ledger-based deposits get sequential IDs
+    let (env, vault, token, _admin, alice, _bob) = setup_deposit_id_tests();
+
+    let current_ledger = env.ledger().sequence();
+
+    let id0 = vault.deposit_by_ledger(&alice, &token, &100, &(current_ledger + 100), &0);
+    let id1 = vault.deposit_by_ledger(&alice, &token, &100, &(current_ledger + 200), &0);
+    let id2 = vault.deposit_by_ledger(&alice, &token, &100, &(current_ledger + 300), &0);
+
+    assert_eq!(id0, 0);
+    assert_eq!(id1, 1);
+    assert_eq!(id2, 2);
+}
+
+#[test]
+fn test_deposit_by_ledger_shares_counter_with_time_deposits() {
+    // Ledger-based and time-based deposits share the same counter,
+    // so IDs remain unique and monotonic across both types
+    let (env, vault, token, _admin, alice, _bob) = setup_deposit_id_tests();
+
+    let base_time = env.ledger().timestamp();
+    let current_ledger = env.ledger().sequence();
+
+    let id0 = vault.deposit(&alice, &token, &100, &(base_time + 3600), &0);
+    let id1 = vault.deposit_by_ledger(&alice, &token, &100, &(current_ledger + 100), &0);
+    let id2 = vault.deposit(&alice, &token, &100, &(base_time + 7200), &0);
+    let id3 = vault.deposit_by_ledger(&alice, &token, &100, &(current_ledger + 200), &0);
+
+    assert_eq!(id0, 0);
+    assert_eq!(id1, 1);
+    assert_eq!(id2, 2);
+    assert_eq!(id3, 3);
+
+    // The shared counter is reflected in the deposit ID list
+    let ids = vault.get_deposit_ids(&alice);
+    assert_eq!(ids.len(), 4);
+    assert_eq!(ids.get(0).unwrap(), 0);
+    assert_eq!(ids.get(1).unwrap(), 1);
+    assert_eq!(ids.get(2).unwrap(), 2);
+    assert_eq!(ids.get(3).unwrap(), 3);
+}
+
+#[test]
+fn test_deposit_by_ledger_stored_durably() {
+    // The deposit record is stored durably: it remains retrievable
+    // after advancing the ledger (TTL extended beyond temporary storage)
+    let (env, vault, token, _admin, alice, _bob) = setup_deposit_id_tests();
+
+    let current_ledger = env.ledger().sequence();
+    let unlock_ledger = current_ledger + 1_000;
+
+    let id = vault.deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &0);
+
+    // Advance the ledger sequence significantly
+    env.ledger().set(LedgerInfo {
+        timestamp: env.ledger().timestamp() + 10_000,
+        sequence_number: current_ledger + 500,
+        network_id: Default::default(),
+        base_fee: 100,
+        min_temp_entry_ttl: 0,
+        min_persistent_entry_ttl: 0,
+        max_entry_ttl: u32::MAX,
+    });
+
+    // The deposit should still be retrievable (durably stored)
+    let deposit = vault
+        .get_ledger_vault(&alice, &id)
+        .expect("Ledger-based deposit should persist across ledger advances");
+
+    assert_eq!(deposit.unlock_ledger, unlock_ledger);
+    assert_eq!(deposit.amount, 1_000);
+}
+
+#[test]
+fn test_get_ledger_vault_returns_expected_unlock_ledger() {
+    // Query returns the ledger-based deposit with the expected unlock_ledger
+    let (env, vault, token, _admin, alice, _bob) = setup_deposit_id_tests();
+
+    let current_ledger = env.ledger().sequence();
+    let unlock_ledger = current_ledger + 42;
+
+    let id = vault.deposit_by_ledger(&alice, &token, &2_500, &unlock_ledger, &0);
+
+    let deposit = vault
+        .get_ledger_vault(&alice, &id)
+        .expect("Query should return the ledger-based deposit");
+
+    assert_eq!(deposit.unlock_ledger, unlock_ledger);
+    assert_eq!(deposit.amount, 2_500);
+    assert_eq!(deposit.depositor, alice);
+
+    // A non-existent ID should return None
+    assert!(vault.get_ledger_vault(&alice, &(id + 1)).is_none());
+}
