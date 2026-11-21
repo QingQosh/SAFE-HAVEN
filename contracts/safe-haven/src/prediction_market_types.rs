@@ -140,6 +140,10 @@ pub struct UserRewards {
 
 /// Constants for prediction market operations
 pub const MIN_MARKET_DURATION_SECS: u64 = 3600; // 1 hour minimum
+/// Minimum number of outcomes a market must define (inclusive)
+pub const MIN_OUTCOME_COUNT: u32 = MIN_OUTCOMES_PER_MARKET;
+/// Maximum number of outcomes a market may define (inclusive)
+pub const MAX_OUTCOME_COUNT: u32 = MAX_OUTCOMES_PER_MARKET;
 pub const MAX_MARKET_DURATION_SECS: u64 = 157_788_000; // 5 years max (same as deposit max)
 pub const MIN_BET_AMOUNT: i128 = 1; // Minimum 1 unit
 pub const MAX_BET_AMOUNT: i128 = 1_000_000_000_000_000; // 10^15 (same as max deposit)

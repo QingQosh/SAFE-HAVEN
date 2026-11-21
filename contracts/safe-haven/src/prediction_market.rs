@@ -73,32 +73,35 @@ pub fn create_market(
 
     let now = env.ledger().timestamp();
 
-    // Validate timing
+    // Validate timing: close_time must be strictly in the future.
     if close_time <= now {
         return Err(PredictionMarketError::ResolutionTimeInPast);
     }
 
+    // Validate timing: close_time must be at least MIN_MARKET_DURATION_SECS away.
     let close_duration = close_time.saturating_sub(now);
     if close_duration < MIN_MARKET_DURATION_SECS {
         return Err(PredictionMarketError::InvalidResolutionTime);
     }
 
+    // Validate timing: resolution_deadline must be strictly after close_time.
     if resolution_deadline <= close_time {
         return Err(PredictionMarketError::InvalidResolutionTime);
     }
 
+    // Validate timing: resolution window must meet the configured minimum.
     let resolution_duration = resolution_deadline.saturating_sub(close_time);
     if resolution_duration < config.min_resolution_time_secs {
         return Err(PredictionMarketError::InvalidResolutionTime);
     }
 
-    // Validate outcomes
+    // Validate outcomes: count must be within [MIN_OUTCOMES_PER_MARKET, MAX_OUTCOMES_PER_MARKET].
     let outcome_count = outcome_names.len() as u32;
     if outcome_count < MIN_OUTCOMES_PER_MARKET || outcome_count > MAX_OUTCOMES_PER_MARKET {
         return Err(PredictionMarketError::InvalidOutcomeCount);
     }
 
-    // Validate fee
+    // Validate fee: must not exceed MAX_FEE_BPS.
     let fee_bps = fee_bps.unwrap_or(config.default_fee_bps);
     if fee_bps > MAX_FEE_BPS {
         return Err(PredictionMarketError::InvalidFeeBps);
@@ -161,9 +164,10 @@ pub fn place_bet(
     amount: i128,
     token: Address,
 ) -> Result<(), PredictionMarketError> {
+    // Authorization: the bettor must authorize this bet.
     bettor.require_auth();
 
-    // Validate amount
+    // Validate amount: must be within [MIN_BET_AMOUNT, MAX_BET_AMOUNT].
     if amount < MIN_BET_AMOUNT || amount > MAX_BET_AMOUNT {
         return Err(PredictionMarketError::InvalidBetAmount);
     }
@@ -174,17 +178,17 @@ pub fn place_bet(
     let mut market = storage::get_market(env, market_id)
         .ok_or(PredictionMarketError::MarketNotFound)?;
 
-    // Check market is open
+    // Status: only Open markets accept bets.
     if market.status != MarketStatus::Open {
         return Err(PredictionMarketError::MarketNotOpen);
     }
 
-    // Check betting deadline
+    // Timing: betting must occur strictly before close_time.
     if now >= market.close_time {
         return Err(PredictionMarketError::BettingClosed);
     }
 
-    // Validate outcome
+    // Validate outcome id is within range.
     if outcome_id >= market.outcome_count {
         return Err(PredictionMarketError::InvalidOutcomeId);
     }
@@ -193,7 +197,7 @@ pub fn place_bet(
     let mut outcome = storage::get_outcome(env, market_id, outcome_id)
         .ok_or(PredictionMarketError::InvalidOutcomeId)?;
 
-    // Check if user already bet on this outcome in the market
+    // Uniqueness: a bettor may only bet once per outcome in a market.
     if storage::has_user_bet_on_outcome(env, &bettor, market_id, outcome_id) {
         return Err(PredictionMarketError::AlreadyBetOnOutcome);
     }
@@ -258,6 +262,7 @@ pub fn close_market(env: &Env, closer: Address, market_id: u32) -> Result<(), Pr
     let mut market = storage::get_market(env, market_id)
         .ok_or(PredictionMarketError::MarketNotFound)?;
 
+    // Status transition: only Open markets can be closed.
     if market.status != MarketStatus::Open {
         return Err(PredictionMarketError::InvalidMarketStatus);
     }
@@ -290,7 +295,7 @@ pub fn resolve_market(
         return Err(PredictionMarketError::UnauthorizedOracle);
     }
 
-    // Check market is closed
+    // Status transition: only Closed markets can be resolved.
     if market.status != MarketStatus::Closed {
         return Err(PredictionMarketError::MarketNotClosedYet);
     }
@@ -448,6 +453,7 @@ pub fn cancel_market(
     let mut market = storage::get_market(env, market_id)
         .ok_or(PredictionMarketError::MarketNotFound)?;
 
+    // Status transition: only Open or Closed markets can be cancelled.
     match market.status {
         MarketStatus::Open | MarketStatus::Closed => {}
         MarketStatus::Resolved => {

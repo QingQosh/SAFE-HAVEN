@@ -55,4 +55,8 @@ pub enum PredictionMarketError {
 
     /// `init_prediction_markets` was called on an already-initialized subsystem.
     AlreadyInitialized = 1031,
+
+    /// The market's close time is not sufficiently in the future
+    /// (must be > now + MIN_MARKET_DURATION_SECS).
+    CloseTimeTooSoon = 1032,
 }
