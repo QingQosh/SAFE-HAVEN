@@ -43,6 +43,9 @@ const FLASH_LOAN_FEE_BPS: u32 = 10;
 /// Seconds in a year (non-leap) used for pro-rata interest calculations.
 const SECS_PER_YEAR: u128 = 31_536_000;
 
+/// Length of the MEV commit-reveal window: 30 minutes.
+const MEV_REVEAL_WINDOW_SECS: u64 = 30 * 60;
+
 fn auto_pause(env: &Env, amount: i128) {
     let ledger = env.ledger().sequence();
     let activation = CircuitBreakerActivation {
@@ -3109,6 +3112,90 @@ impl SafeHaven {
     }
 
     // ----------------------------------------------------------------
+    //  MEV Commit / Reveal
+    // ----------------------------------------------------------------
+
+    /// Submit a commit hash for a deposit, enabling MEV-protected reveal.
+    ///
+    /// The commitment is keyed by `(depositor, deposit_id)` and may only be
+    /// submitted once per deposit — a second commit returns
+    /// `VaultError::CommitAlreadyExists` rather than silently overwriting the
+    /// original hash. The stored commitment is given a TTL that covers the
+    /// full 30-minute reveal window, and the deposit's MEV status is set to
+    /// `MEVStatus::Committed`.
+    pub fn mev_commit(
+        env: Env,
+        depositor: Address,
+        deposit_id: u32,
+        commit_hash: Bytes,
+    ) -> Result<(), VaultError> {
+        depositor.require_auth();
+
+        // Reject overwrites: a commitment already exists for this deposit.
+        if storage::get_mev_commit(&env, &depositor, deposit_id).is_some() {
+            return Err(VaultError::CommitAlreadyExists);
+        }
+
+        let now = env.ledger().timestamp();
+        let commitment = MEVCommitment {
+            commit_hash: commit_hash.clone(),
+            committed_at: now,
+            revealed: false,
+        };
+
+        // Persist with a TTL covering the full reveal window.
+        storage::set_mev_commit(&env, &depositor, deposit_id, &commitment);
+        storage::extend_mev_commit_ttl(&env, &depositor, deposit_id);
+
+        storage::set_mev_status(&env, &depositor, deposit_id, MEVStatus::Committed);
+
+        events::mev_commit_submitted(&env, &depositor, deposit_id, &commit_hash, now);
+
+        Ok(())
+    }
+
+    /// Reveal a previously submitted MEV commitment.
+    ///
+    /// Loads the stored commitment, enforces the 30-minute reveal window,
+    /// verifies the supplied preimage against the stored hash, and on success
+    /// removes the commitment and marks the deposit as `MEVStatus::Revealed`.
+    pub fn mev_reveal(
+        env: Env,
+        depositor: Address,
+        deposit_id: u32,
+        preimage: Bytes,
+    ) -> Result<(), VaultError> {
+        depositor.require_auth();
+
+        let commitment = storage::get_mev_commit(&env, &depositor, deposit_id)
+            .ok_or(VaultError::CommitNotFound)?;
+
+        // Extend TTL on read so the commitment survives the full window.
+        storage::extend_mev_commit_ttl(&env, &depositor, deposit_id);
+
+        let now = env.ledger().timestamp();
+        let elapsed = now.saturating_sub(commitment.committed_at);
+        if elapsed > MEV_REVEAL_WINDOW_SECS {
+            return Err(VaultError::RevealWindowExpired);
+        }
+
+        // Verify the preimage hashes to the stored commitment.
+        let computed = env.crypto().sha256(&preimage);
+        let computed_bytes = Bytes::from(computed);
+        if computed_bytes != commitment.commit_hash {
+            return Err(VaultError::InvalidCommitment);
+        }
+
+        // Successful reveal: clean up the stored commitment.
+        storage::remove_mev_commit(&env, &depositor, deposit_id);
+        storage::set_mev_status(&env, &depositor, deposit_id, MEVStatus::Revealed);
+
+        events::mev_commit_revealed(&env, &depositor, deposit_id, now);
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------
     //  Admin: Emergency Lockdown
     // ----------------------------------------------------------------
 
@@ -4993,13 +5080,21 @@ impl SafeHaven {
         crate::prediction_market::cancel_market(&env, admin, market_id, token)
     }
 
-    /// Pause or unpause market creation.
+    /// Pause or unpause market creation (admin only).
+    ///
+    /// Delegates to the canonical implementation in the prediction market
+    /// entry-point impl block, which enforces admin auth and persists the flag.
     pub fn set_prediction_market_paused(
         env: Env,
         admin: Address,
         paused: bool,
     ) -> Result<(), crate::prediction_market_errors::PredictionMarketError> {
         crate::prediction_market::set_market_paused(&env, admin, paused)
+    }
+
+    /// Returns whether new prediction market creation is currently paused.
+    pub fn get_prediction_market_paused(env: Env) -> bool {
+        crate::prediction_market::is_market_paused(&env)
     }
 
     // ------ Read-only queries ------
@@ -5132,12 +5227,38 @@ impl SafeHaven {
     }
 
     /// Pause or unpause new market creation (admin only).
+    ///
+    /// Loads the stored `MarketConfig`, requires authorization from the
+    /// configured admin, flips the `paused` flag, persists the config and
+    /// emits a `MarketPauseToggled` event. Non-admins receive
+    /// `PredictionMarketError::Unauthorized`.
     pub fn set_prediction_market_paused(
         env: Env,
         admin: Address,
         paused: bool,
     ) -> Result<(), PredictionMarketError> {
-        prediction_market::set_market_paused(&env, admin, paused)
+        admin.require_auth();
+
+        let mut config = storage::get_market_config(&env)
+            .ok_or(PredictionMarketError::NotInitialized)?;
+
+        if admin != config.admin {
+            return Err(PredictionMarketError::Unauthorized);
+        }
+
+        config.paused = paused;
+        storage::set_market_config(&env, &config);
+
+        events::prediction_market_pause_toggled(&env, &admin, paused);
+
+        Ok(())
+    }
+
+    /// Returns whether new prediction market creation is currently paused.
+    pub fn get_prediction_market_paused(env: Env) -> bool {
+        storage::get_market_config(&env)
+            .map(|config| config.paused)
+            .unwrap_or(false)
     }
 
     // ----------------------------------------------------------------

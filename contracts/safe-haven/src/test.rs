@@ -259,6 +259,48 @@ fn test_double_initialize_fails() {
     assert_eq!(result, Err(Ok(VaultError::AlreadyInitialized)));
 }
 
+/// #16 — the first `initialize` call succeeds and sets every piece of
+/// initial state atomically.
+#[test]
+fn test_initialize_first_call_sets_all_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let vault_id = env.register(SafeHaven, ());
+    let vault = SafeHavenClient::new(&env, &vault_id);
+    let admin: Address = Address::generate(&env);
+    let fee: Address = Address::generate(&env);
+
+    assert!(!vault.is_initialized());
+    vault.initialize(&admin, &fee, &None, &None);
+
+    assert!(vault.is_initialized());
+    assert_eq!(vault.get_admin(), Some(admin));
+    assert_eq!(vault.get_fee_recipient(), Some(fee));
+    assert_eq!(crate::storage::get_rewards_pool(&env), 0);
+    assert!(!vault.is_paused());
+}
+
+/// #16 — a second `initialize` returns `AlreadyInitialized` (code 15) and
+/// leaves the admin, fee recipient and rewards pool untouched.
+#[test]
+fn test_initialize_second_call_returns_code_15_and_preserves_state() {
+    let (env, vault, _token, admin, _alice, fee) = setup();
+    let attacker: Address = Address::generate(&env);
+
+    let err = vault
+        .try_initialize(&attacker, &attacker, &None, &None)
+        .expect_err("second initialize must fail");
+    let inner = err.expect("should be a VaultError");
+    assert_eq!(inner as u32, 15, "AlreadyInitialized must be error code 15");
+
+    // No state was modified by the rejected call.
+    assert_eq!(vault.get_admin(), Some(admin));
+    assert_eq!(vault.get_fee_recipient(), Some(fee));
+    assert_eq!(crate::storage::get_rewards_pool(&env), 0);
+    assert!(vault.is_initialized());
+}
+
 #[test]
 fn test_is_initialized() {
     let env = Env::default();
@@ -3117,6 +3159,154 @@ fn test_mev_commit_can_be_removed() {
     
     // Verify it's gone
     assert_eq!(get_mev_commit(&env, &alice, 0), None);
+}
+
+/// #31 — a commit submitted via `mev_commit` is retrievable for the
+/// (depositor, deposit_id) key it was submitted under, and only that key.
+#[test]
+fn test_mev_commit_stored_and_retrievable_per_key() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let unlock_time = env.ledger().timestamp() + 3_600;
+    let id0 = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+    let id1 = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+
+    let commit0 = BytesN::from_array(&env, &[0x11u8; 32]);
+    let commit1 = BytesN::from_array(&env, &[0x22u8; 32]);
+
+    vault.mev_commit(&alice, &id0, &commit0);
+    vault.mev_commit(&alice, &id1, &commit1);
+
+    // Each key resolves to its own commit.
+    assert_eq!(vault.get_mev_commit_query(&alice, &id0), Some(commit0.clone()));
+    assert_eq!(vault.get_mev_commit_query(&alice, &id1), Some(commit1.clone()));
+
+    // A deposit without a commit has none.
+    let id2 = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+    assert_eq!(vault.get_mev_commit_query(&alice, &id2), None);
+}
+
+/// #31 — a second `mev_commit` for the same (depositor, deposit_id) must be
+/// rejected and must not overwrite the originally stored hash.
+#[test]
+fn test_mev_commit_second_submission_rejected_and_original_kept() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let unlock_time = env.ledger().timestamp() + 3_600;
+    let id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+
+    let original = BytesN::from_array(&env, &[0xAAu8; 32]);
+    let replacement = BytesN::from_array(&env, &[0xBBu8; 32]);
+
+    vault.mev_commit(&alice, &id, &original);
+
+    let second = vault.try_mev_commit(&alice, &id, &replacement);
+    assert_eq!(second, Err(Ok(VaultError::CommitAlreadyExists)));
+
+    // Original hash must be untouched.
+    assert_eq!(vault.get_mev_commit_query(&alice, &id), Some(original));
+}
+
+/// #31 — the commit stays retrievable for the whole 30-minute reveal window
+/// and reveal still succeeds at the very end of it.
+#[test]
+fn test_mev_commit_persists_full_reveal_window() {
+    use crate::constants::MEV_REVEAL_WINDOW_SECS;
+
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let unlock_time = env.ledger().timestamp() + 3_600;
+    let id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+
+    let amount: i128 = 1_000;
+    let price: i128 = 100;
+    let nonce: u32 = 3;
+    let commit_hash = make_commit_hash(&env, &token, amount, price, nonce);
+
+    vault.mev_commit(&alice, &id, &commit_hash);
+
+    // Halfway through the window the commit is still there.
+    advance_time(&env, MEV_REVEAL_WINDOW_SECS / 2);
+    assert_eq!(vault.get_mev_commit_query(&alice, &id), Some(commit_hash.clone()));
+
+    // Right at the end of the window it is still there and reveal works.
+    advance_time(&env, MEV_REVEAL_WINDOW_SECS / 2);
+    assert_eq!(vault.get_mev_commit_query(&alice, &id), Some(commit_hash));
+    vault.mev_reveal(&alice, &id, &token, &amount, &price, &nonce);
+}
+
+/// #31 — once the 30-minute reveal window has elapsed, reveal fails with
+/// `RevealWindowExpired`.
+#[test]
+fn test_mev_reveal_after_window_expires_fails() {
+    use crate::constants::MEV_REVEAL_WINDOW_SECS;
+
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let unlock_time = env.ledger().timestamp() + 3_600;
+    let id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+
+    let amount: i128 = 1_000;
+    let price: i128 = 100;
+    let nonce: u32 = 9;
+    let commit_hash = make_commit_hash(&env, &token, amount, price, nonce);
+
+    vault.mev_commit(&alice, &id, &commit_hash);
+
+    advance_time(&env, MEV_REVEAL_WINDOW_SECS + 1);
+
+    assert_eq!(
+        vault.try_mev_reveal(&alice, &id, &token, &amount, &price, &nonce),
+        Err(Ok(VaultError::RevealWindowExpired))
+    );
+}
+
+/// #31 — reading the commit extends its TTL so it survives repeated access
+/// across a long stretch of ledger time.
+#[test]
+fn test_mev_commit_ttl_extended_on_access() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let unlock_time = env.ledger().timestamp() + 3_600;
+    let id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+
+    let commit_hash = BytesN::from_array(&env, &[0x5Au8; 32]);
+    vault.mev_commit(&alice, &id, &commit_hash);
+
+    // Repeatedly read the commit, advancing time between reads.  If the TTL
+    // were not bumped on access the entry would be archived and reads would
+    // start returning None.
+    for _ in 0..5 {
+        advance_time(&env, 60);
+        assert_eq!(vault.get_mev_commit_query(&alice, &id), Some(commit_hash.clone()));
+    }
+}
+
+/// #31 — after a successful reveal the commit is cleared, so a second reveal
+/// for the same deposit fails with `CommitNotFound`.
+#[test]
+fn test_mev_commit_removed_after_successful_reveal() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let unlock_time = env.ledger().timestamp() + 3_600;
+    let id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+
+    let amount: i128 = 1_000;
+    let price: i128 = 100;
+    let nonce: u32 = 5;
+    let commit_hash = make_commit_hash(&env, &token, amount, price, nonce);
+
+    vault.mev_commit(&alice, &id, &commit_hash);
+    vault.mev_reveal(&alice, &id, &token, &amount, &price, &nonce);
+
+    // Commit is gone after reveal.
+    assert_eq!(vault.get_mev_commit_query(&alice, &id), None);
+
+    // A second reveal has nothing to match against.
+    assert_eq!(
+        vault.try_mev_reveal(&alice, &id, &token, &amount, &price, &nonce),
+        Err(Ok(VaultError::CommitNotFound))
+    );
 }
 
 /// Test 6: Multiple commits persist independently.

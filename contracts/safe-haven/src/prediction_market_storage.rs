@@ -7,9 +7,7 @@ use soroban_sdk::{Address, Env, String, Vec};
 use crate::constants::MAX_LOCK_DURATION_SECS;
 use crate::prediction_market_types::{
     Bet, MarketConfig, MarketOutcome, OracleResolution, PredictionMarket,
-    PredictionMarket, MarketOutcome, Bet, BetKey, MarketConfig, OracleResolution,
 };
-use crate::types::MAX_LOCK_DURATION_SECS;
 
 // Storage key types for prediction markets
 #[derive(Clone)]
@@ -61,11 +59,22 @@ pub fn set_pm_initialized(env: &Env) {
         .extend_ttl(&key, MARKET_BUMP_THRESHOLD, MARKET_BUMP_TARGET);
 }
 
+/// Load the global market configuration.
+///
+/// The returned `MarketConfig` carries the full configuration state,
+/// including the `paused` flag that gates market creation.
 pub fn get_market_config(env: &Env) -> Option<MarketConfig> {
     let key = soroban_sdk::Symbol::new(env, "pm_cfg");
-    env.storage().persistent().get(&key)
+    let config: Option<MarketConfig> = env.storage().persistent().get(&key);
+    if config.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MARKET_BUMP_THRESHOLD, MARKET_BUMP_TARGET);
+    }
+    config
 }
 
+/// Persist the global market configuration, including the `paused` flag.
 pub fn set_market_config(env: &Env, config: &MarketConfig) {
     let key = soroban_sdk::Symbol::new(env, "pm_cfg");
     env.storage().persistent().set(&key, config);
@@ -74,10 +83,38 @@ pub fn set_market_config(env: &Env, config: &MarketConfig) {
         .extend_ttl(&key, MARKET_BUMP_THRESHOLD, MARKET_BUMP_TARGET);
 }
 
+/// Returns `true` if market creation is currently paused.
+///
+/// Defaults to `false` when no configuration has been stored yet.
+pub fn is_market_paused(env: &Env) -> bool {
+    get_market_config(env).map(|c| c.paused).unwrap_or(false)
+}
+
+/// Set the market pause flag, preserving all other configuration fields.
+///
+/// Returns `false` if the subsystem has not been initialized (no config
+/// stored), otherwise persists the updated config and returns `true`.
+pub fn set_market_paused(env: &Env, paused: bool) -> bool {
+    match get_market_config(env) {
+        Some(mut config) => {
+            config.paused = paused;
+            set_market_config(env, &config);
+            true
+        }
+        None => false,
+    }
+}
+
 // ================================================================
 //  Market CRUD Helpers
 // ================================================================
 
+/// Load the full `PredictionMarket` struct for a market.
+///
+/// The returned struct contains all market fields: `market_id`, `status`,
+/// `close_time`, `oracle`, `outcome_count`, `total_pool`, `bettor_count`,
+/// `winning_outcome`, `resolution_data`, `fee_bps`, and the rest of the
+/// persisted market state.
 pub fn get_market(env: &Env, market_id: u32) -> Option<PredictionMarket> {
     let key = soroban_sdk::Symbol::new(env, &format!("pm_{}", market_id));
     let market: Option<PredictionMarket> = env.storage().persistent().get(&key);
@@ -317,4 +354,18 @@ pub fn get_market_outcomes(env: &Env, market_id: u32, outcome_count: u32) -> Vec
         }
     }
     outcomes
+}
+
+/// Load all outcomes for a market in ascending `outcome_id` order.
+///
+/// Convenience wrapper around [`get_market_outcomes`] that derives the
+/// outcome count from the stored market struct, so callers (e.g. the
+/// `get_prediction_market` query) can include the full outcome list without
+/// knowing the count up front. Returns an empty Vec if the market does not
+/// exist or has no outcomes stored.
+pub fn get_all_market_outcomes(env: &Env, market_id: u32) -> Vec<MarketOutcome> {
+    match get_market_readonly(env, market_id) {
+        Some(market) => get_market_outcomes(env, market_id, market.outcome_count),
+        None => Vec::new(env),
+    }
 }

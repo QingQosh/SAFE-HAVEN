@@ -1460,6 +1460,219 @@ mod prediction_market_tests {
         );
     }
 
+    // ----------------------------------------------------------------
+    //  Issue #95: get_prediction_market query completeness
+    // ----------------------------------------------------------------
+
+    /// Query returns every field of a freshly created (Open) market.
+    #[test]
+    fn test_get_prediction_market_returns_all_fields_open() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+
+        let now = env.ledger().timestamp();
+        let close_time = now + 7_200;
+        let resolution_deadline = close_time + 7_200;
+
+        let mut names = Vec::new(&env);
+        names.push_back(String::from_str(&env, "Yes"));
+        names.push_back(String::from_str(&env, "No"));
+        names.push_back(String::from_str(&env, "Maybe"));
+
+        let market_id = client.create_prediction_market(
+            &alice,
+            &String::from_str(&env, "aggregate_deposits"),
+            &String::from_str(&env, "Query completeness"),
+            &oracle,
+            &close_time,
+            &resolution_deadline,
+            &names,
+            &None,
+        );
+
+        let market = client
+            .get_prediction_market(&market_id)
+            .expect("market must exist");
+
+        assert_eq!(market.market_id, market_id);
+        assert_eq!(market.status, MarketStatus::Open);
+        assert_eq!(market.close_time, close_time);
+        assert_eq!(market.resolution_deadline, resolution_deadline);
+        assert_eq!(market.oracle, oracle);
+        assert_eq!(market.outcome_count, 3);
+        assert_eq!(market.total_pool, 0);
+        assert_eq!(market.bettor_count, 0);
+        assert_eq!(market.winning_outcome, None);
+        assert_eq!(market.resolution_data, None);
+
+        // Outcomes are returned in order via the companion query
+        let mwo = client
+            .get_market_with_outcomes(&market_id)
+            .expect("outcomes must exist");
+        assert_eq!(mwo.outcomes.len(), 3);
+        assert_eq!(mwo.outcomes.get(0).unwrap().name, String::from_str(&env, "Yes"));
+        assert_eq!(mwo.outcomes.get(1).unwrap().name, String::from_str(&env, "No"));
+        assert_eq!(mwo.outcomes.get(2).unwrap().name, String::from_str(&env, "Maybe"));
+    }
+
+    /// Query reflects pool and bettor counts after multiple bettors place bets.
+    #[test]
+    fn test_get_prediction_market_pool_and_bettor_count_accurate() {
+        let (env, contract, bettor, token, market_id, _) = betting_fixture();
+
+        let bettor2 = Address::generate(&env);
+        StellarAssetClient::new(&env, &token).mint(&bettor, &500);
+        StellarAssetClient::new(&env, &token).mint(&bettor2, &500);
+        TokenClient::new(&env, &token).approve(
+            &bettor,
+            &contract,
+            &500,
+            &env.ledger().sequence().saturating_add(100),
+        );
+        TokenClient::new(&env, &token).approve(
+            &bettor2,
+            &contract,
+            &500,
+            &env.ledger().sequence().saturating_add(100),
+        );
+
+        env.as_contract(&contract, || {
+            prediction_market::place_bet(&env, bettor.clone(), market_id, 0, 100, token.clone())
+                .unwrap();
+            prediction_market::place_bet(&env, bettor.clone(), market_id, 1, 50, token.clone())
+                .unwrap();
+            prediction_market::place_bet(&env, bettor2.clone(), market_id, 0, 200, token.clone())
+                .unwrap();
+
+            let market = storage::get_market_readonly(&env, market_id).unwrap();
+            assert_eq!(market.total_pool, 350, "pool must equal sum of bets");
+            assert_eq!(market.bettor_count, 2, "count must equal distinct bettors");
+            assert_eq!(market.status, MarketStatus::Open);
+        });
+    }
+
+    /// Query returns Closed status after the oracle closes the market.
+    #[test]
+    fn test_get_prediction_market_closed_state() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+
+        client.close_prediction_market(&oracle, &market_id);
+
+        let market = client.get_prediction_market(&market_id).unwrap();
+        assert_eq!(market.market_id, market_id);
+        assert_eq!(market.status, MarketStatus::Closed);
+        assert_eq!(market.oracle, oracle);
+        assert_eq!(market.winning_outcome, None);
+        assert_eq!(market.resolution_data, None);
+    }
+
+    /// Query returns Resolved status with winning_outcome after resolution.
+    #[test]
+    fn test_get_prediction_market_resolved_state() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+
+        client.close_prediction_market(&oracle, &market_id);
+        client.resolve_prediction_market(&oracle, &market_id, &1, &Some(777));
+
+        let market = client.get_prediction_market(&market_id).unwrap();
+        assert_eq!(market.market_id, market_id);
+        assert_eq!(market.status, MarketStatus::Resolved);
+        assert_eq!(market.winning_outcome, Some(1));
+        assert_eq!(market.resolution_data, Some(777));
+    }
+
+    /// Query returns Cancelled status after admin cancellation.
+    #[test]
+    fn test_get_prediction_market_cancelled_state() {
+        let (env, client, token, admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+
+        client.cancel_prediction_market(&admin, &market_id, &token);
+
+        let market = client.get_prediction_market(&market_id).unwrap();
+        assert_eq!(market.market_id, market_id);
+        assert_eq!(market.status, MarketStatus::Cancelled);
+        assert_eq!(market.winning_outcome, None);
+    }
+
+    /// Unknown market_id returns MarketNotFound.
+    #[test]
+    fn test_get_prediction_market_unknown_returns_not_found() {
+        let (_env, client, _token, _admin, _alice, _fee, _oracle) = setup();
+
+        assert_eq!(
+            client.try_get_prediction_market(&9999),
+            Err(Ok(PredictionMarketError::MarketNotFound))
+        );
+    }
+
+    // ----------------------------------------------------------------
+    //  Issue #94: set_prediction_market_paused
+    // ----------------------------------------------------------------
+
+    /// Only the admin may toggle the pause flag.
+    #[test]
+    fn test_set_prediction_market_paused_admin_only() {
+        let (env, client, _token, admin, alice, _fee, _oracle) = setup();
+
+        // Non-admin is rejected
+        assert_eq!(
+            client.try_set_prediction_market_paused(&alice, &true),
+            Err(Ok(PredictionMarketError::Unauthorized))
+        );
+
+        // Admin succeeds and flag persists
+        client
+            .set_prediction_market_paused(&admin, &true)
+            .expect("admin should be able to pause");
+        assert!(prediction_market_storage::get_market_config(&env).unwrap().paused);
+    }
+
+    /// While paused, market creation fails with MarketPaused; unpausing restores it.
+    #[test]
+    fn test_pause_blocks_market_creation_and_unpause_restores() {
+        let (env, client, _token, admin, alice, _fee, oracle) = setup();
+
+        client.set_prediction_market_paused(&admin, &true).unwrap();
+
+        let now = env.ledger().timestamp();
+        let mut names = Vec::new(&env);
+        names.push_back(String::from_str(&env, "Yes"));
+        names.push_back(String::from_str(&env, "No"));
+
+        let result = client.try_create_prediction_market(
+            &alice,
+            &String::from_str(&env, "aggregate_deposits"),
+            &String::from_str(&env, "paused"),
+            &oracle,
+            &(now + 7_200),
+            &(now + 14_400),
+            &names,
+            &None,
+        );
+        assert_eq!(result, Err(Ok(PredictionMarketError::MarketPaused)));
+
+        // Unpause restores functionality
+        client.set_prediction_market_paused(&admin, &false).unwrap();
+        assert!(!prediction_market_storage::get_market_config(&env).unwrap().paused);
+
+        let market_id = client.create_prediction_market(
+            &alice,
+            &String::from_str(&env, "aggregate_deposits"),
+            &String::from_str(&env, "unpaused"),
+            &oracle,
+            &(now + 7_200),
+            &(now + 14_400),
+            &names,
+            &None,
+        );
+        assert_eq!(
+            client.get_prediction_market(&market_id).unwrap().status,
+            MarketStatus::Open
+        );
+    }
+
     /// Full lifecycle: create → close → resolve with data → query confirms data.
     #[test]
     fn test_full_lifecycle_resolution_data_stored() {

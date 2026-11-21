@@ -62,5 +62,7 @@ pub enum VaultError {
     /// Renewable energy percentage must be 0-100
     InvalidRenewableEnergyPercent = 28,
     /// Recipient address is invalid (zero address)
-    InvalidRecipient = 28,
+    InvalidRecipient = 29,
+    /// Contract has not been initialized yet (issue #16).
+    NotInitialized = 30,
 }
