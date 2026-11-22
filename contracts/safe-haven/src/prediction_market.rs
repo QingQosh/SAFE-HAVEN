@@ -13,15 +13,24 @@ use crate::prediction_market_types::*;
 //  Market Initialization
 // ================================================================
 
-/// Initialize the prediction market subsystem
+/// Default fee applied when `init_prediction_markets` is called without an
+/// explicit fee (100 basis points = 1%).
+pub const DEFAULT_FEE_BPS: u32 = 100;
+
+/// Initialize the prediction market subsystem.
 ///
-/// One-time setup that configures the admin, fee recipient and default fee.
-/// When `default_fee_bps` is `None`, `DEFAULT_FEE_BPS` (100 = 1%) is used.
+/// This is a one-time setup entry point. It:
+/// - requires authorization from `admin`,
+/// - returns `AlreadyInitialized` if the subsystem was already set up,
+/// - defaults `fee_bps` to [`DEFAULT_FEE_BPS`] (100 = 1%) when `None`,
+/// - validates that the fee does not exceed [`MAX_FEE_BPS`],
+/// - persists the resulting [`MarketConfig`] and marks the subsystem as
+///   initialized.
 pub fn init_prediction_markets(
     env: &Env,
     admin: Address,
     fee_recipient: Address,
-    default_fee_bps: Option<u32>,
+    fee_bps: Option<u32>,
 ) -> Result<(), PredictionMarketError> {
     admin.require_auth();
 
@@ -30,8 +39,10 @@ pub fn init_prediction_markets(
         return Err(PredictionMarketError::AlreadyInitialized);
     }
 
+    // Resolve the fee, defaulting to 1% when not supplied
+    let default_fee_bps = fee_bps.unwrap_or(DEFAULT_FEE_BPS);
+
     // Validate fee
-    let default_fee_bps = default_fee_bps.unwrap_or(DEFAULT_FEE_BPS);
     if default_fee_bps > MAX_FEE_BPS {
         return Err(PredictionMarketError::InvalidFeeBps);
     }
@@ -50,7 +61,10 @@ pub fn init_prediction_markets(
     Ok(())
 }
 
-/// Backwards-compatible wrapper around [`init_prediction_markets`].
+/// Initialize the prediction market subsystem with an explicit fee.
+///
+/// Thin wrapper around [`init_prediction_markets`] kept for callers that
+/// already pass a concrete fee value.
 pub fn initialize_markets(
     env: &Env,
     admin: Address,
@@ -129,6 +143,7 @@ pub fn create_market(
         market_id,
         market_type: market_type.clone(),
         description,
+        creator: creator.clone(),
         oracle: oracle.clone(),
         close_time,
         resolution_deadline,
@@ -188,7 +203,7 @@ pub fn place_bet(
     let mut market = storage::get_market(env, market_id)
         .ok_or(PredictionMarketError::MarketNotFound)?;
 
-    // Check market is open
+    // Check market is open (bets are rejected once the market is Closed/Resolved/Cancelled)
     if market.status != MarketStatus::Open {
         return Err(PredictionMarketError::MarketNotOpen);
     }
@@ -261,17 +276,15 @@ pub fn close_market(env: &Env, closer: Address, market_id: u32) -> Result<(), Pr
     let config = storage::get_market_config(env)
         .ok_or(PredictionMarketError::InternalError)?;
 
-    // Only admin or oracle can close
-    if closer != config.admin && closer != storage::get_market_readonly(env, market_id)
-        .ok_or(PredictionMarketError::MarketNotFound)?
-        .oracle
-    {
-        return Err(PredictionMarketError::Unauthorized);
-    }
-
     let mut market = storage::get_market(env, market_id)
         .ok_or(PredictionMarketError::MarketNotFound)?;
 
+    // Only creator, admin or oracle can close
+    if closer != market.creator && closer != config.admin && closer != market.oracle {
+        return Err(PredictionMarketError::Unauthorized);
+    }
+
+    // Idempotent close: a second close (or closing a non-Open market) is rejected
     if market.status != MarketStatus::Open {
         return Err(PredictionMarketError::InvalidMarketStatus);
     }

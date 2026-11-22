@@ -62,6 +62,47 @@ fn auto_pause(env: &Env, amount: i128) {
     );
 }
 
+/// Computes the carbon footprint (in grams CO2e) for a deposit.
+///
+/// Formula: `amount × duration_secs × CARBON_BASELINE_PER_UNIT_SECOND`.
+///
+/// Uses checked arithmetic so that extreme inputs return
+/// [`VaultError::CarbonOverflow`] instead of panicking or silently wrapping.
+/// With the current limits (max deposit 10^15, max lock ≈ 1.57788e8 s) the
+/// product is ≈ 1.57788e23, comfortably within `i128::MAX` (≈ 1.7e38).
+///
+/// Rounding: all factors are integers, so the result is exact; no division
+/// (and therefore no truncation) occurs in this function.
+fn calculate_carbon_footprint(amount: i128, duration_secs: u64) -> Result<i128, VaultError> {
+    if amount <= 0 || duration_secs == 0 {
+        return Ok(0);
+    }
+    amount
+        .checked_mul(duration_secs as i128)
+        .and_then(|v| v.checked_mul(crate::constants::CARBON_BASELINE_PER_UNIT_SECOND))
+        .ok_or(VaultError::CarbonOverflow)
+}
+
+/// Computes the carbon offset (in grams CO2e) from a footprint and penalty.
+///
+/// Formula: `footprint × penalty_bps / 10_000`.
+///
+/// Rounding: integer division truncates toward zero (floor for non-negative
+/// values), so the offset never exceeds the footprint. This is consistent
+/// with the penalty-split arithmetic used elsewhere in the contract.
+///
+/// Uses checked arithmetic and returns [`VaultError::CarbonOverflow`] on
+/// overflow rather than panicking.
+fn calculate_carbon_offset(footprint: i128, penalty_bps: u32) -> Result<i128, VaultError> {
+    if footprint <= 0 || penalty_bps == 0 {
+        return Ok(0);
+    }
+    footprint
+        .checked_mul(penalty_bps as i128)
+        .map(|v| v / 10_000)
+        .ok_or(VaultError::CarbonOverflow)
+}
+
 fn check_emergency_withdrawal_limit(env: &Env, amount: i128) -> Result<(), VaultError> {
     let total = storage::get_current_ledger_emergency_withdrawal(env);
     if total.saturating_add(amount) > MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER {
@@ -790,8 +831,8 @@ impl SafeHaven {
 
         // Track sustainability metrics
         let lock_duration: u64 = unlock_time.saturating_sub(now);
-        let carbon_footprint = calculate_carbon_footprint(amount, lock_duration);
-        let carbon_offset = calculate_carbon_offset(carbon_footprint, penalty_bps);
+        let carbon_footprint = calculate_carbon_footprint(amount, lock_duration)?;
+        let carbon_offset = calculate_carbon_offset(carbon_footprint, penalty_bps)?;
         
         let metrics = SustainabilityMetrics {
             deposit_id,
@@ -805,8 +846,12 @@ impl SafeHaven {
         storage::set_sustainability_metrics(&env, &depositor, deposit_id, &metrics);
         
         // Update aggregated totals
-        let total_carbon = storage::get_total_carbon_footprint(&env, &depositor).saturating_add(carbon_footprint);
-        let total_offset = storage::get_total_carbon_offset(&env, &depositor).saturating_add(carbon_offset);
+        let total_carbon = storage::get_total_carbon_footprint(&env, &depositor)
+            .checked_add(carbon_footprint)
+            .ok_or(VaultError::CarbonOverflow)?;
+        let total_offset = storage::get_total_carbon_offset(&env, &depositor)
+            .checked_add(carbon_offset)
+            .ok_or(VaultError::CarbonOverflow)?;
         storage::set_total_carbon_footprint(&env, &depositor, total_carbon);
         storage::set_total_carbon_offset(&env, &depositor, total_offset);
         
@@ -996,8 +1041,8 @@ impl SafeHaven {
 
         // Track sustainability metrics
         let lock_duration: u64 = unlock_time.saturating_sub(now);
-        let carbon_footprint = calculate_carbon_footprint(amount, lock_duration);
-        let carbon_offset = calculate_carbon_offset(carbon_footprint, penalty_bps);
+        let carbon_footprint = calculate_carbon_footprint(amount, lock_duration)?;
+        let carbon_offset = calculate_carbon_offset(carbon_footprint, penalty_bps)?;
         
         let metrics = SustainabilityMetrics {
             deposit_id,
@@ -1011,8 +1056,12 @@ impl SafeHaven {
         storage::set_sustainability_metrics(&env, &depositor, deposit_id, &metrics);
         
         // Update aggregated totals
-        let total_carbon = storage::get_total_carbon_footprint(&env, &depositor).saturating_add(carbon_footprint);
-        let total_offset = storage::get_total_carbon_offset(&env, &depositor).saturating_add(carbon_offset);
+        let total_carbon = storage::get_total_carbon_footprint(&env, &depositor)
+            .checked_add(carbon_footprint)
+            .ok_or(VaultError::CarbonOverflow)?;
+        let total_offset = storage::get_total_carbon_offset(&env, &depositor)
+            .checked_add(carbon_offset)
+            .ok_or(VaultError::CarbonOverflow)?;
         storage::set_total_carbon_footprint(&env, &depositor, total_carbon);
         storage::set_total_carbon_offset(&env, &depositor, total_offset);
         
@@ -1183,8 +1232,8 @@ impl SafeHaven {
 
         // Track sustainability metrics (convert ledger gap to estimated seconds)
         let estimated_duration_secs = (ledger_gap as u64).saturating_mul(storage::LEDGER_SECONDS);
-        let carbon_footprint = calculate_carbon_footprint(amount, estimated_duration_secs);
-        let carbon_offset = calculate_carbon_offset(carbon_footprint, penalty_bps);
+        let carbon_footprint = calculate_carbon_footprint(amount, estimated_duration_secs)?;
+        let carbon_offset = calculate_carbon_offset(carbon_footprint, penalty_bps)?;
         
         let metrics = SustainabilityMetrics {
             deposit_id,
@@ -1198,8 +1247,12 @@ impl SafeHaven {
         storage::set_sustainability_metrics(&env, &depositor, deposit_id, &metrics);
         
         // Update aggregated totals
-        let total_carbon = storage::get_total_carbon_footprint(&env, &depositor).saturating_add(carbon_footprint);
-        let total_offset = storage::get_total_carbon_offset(&env, &depositor).saturating_add(carbon_offset);
+        let total_carbon = storage::get_total_carbon_footprint(&env, &depositor)
+            .checked_add(carbon_footprint)
+            .ok_or(VaultError::CarbonOverflow)?;
+        let total_offset = storage::get_total_carbon_offset(&env, &depositor)
+            .checked_add(carbon_offset)
+            .ok_or(VaultError::CarbonOverflow)?;
         storage::set_total_carbon_footprint(&env, &depositor, total_carbon);
         storage::set_total_carbon_offset(&env, &depositor, total_offset);
         
@@ -1666,8 +1719,7 @@ impl SafeHaven {
                 }
                 // Add stakers_share to rewards pool
                 if stakers_share > 0 {
-                    let current_pool = storage::get_rewards_pool(&env);
-                    storage::set_rewards_pool(&env, current_pool + stakers_share);
+                    storage::add_rewards_pool(&env, stakers_share);
                 }
             }
             if refund > 0 {
@@ -1714,8 +1766,7 @@ impl SafeHaven {
                 }
                 // Add stakers_share to rewards pool
                 if stakers_share > 0 {
-                    let current_pool = storage::get_rewards_pool(&env);
-                    storage::set_rewards_pool(&env, current_pool + stakers_share);
+                    storage::add_rewards_pool(&env, stakers_share);
                 }
             }
             if refund > 0 {
@@ -1828,52 +1879,55 @@ impl SafeHaven {
             return Err(VaultError::NoRewardsToClaim);
         }
 
+        let pool_generation = storage::get_rewards_pool_generation(&env);
+        let claimed_generation =
+            storage::get_staker_rewards_claimed_generation(&env, &staker);
+        if claimed_generation == pool_generation {
+            return Err(VaultError::NoRewardsToClaim);
+        }
+
         // Calculate staker's proportional share
         // reward = (stake_amount / total_staked) * rewards_pool
-        let reward = (stake_amount * rewards_pool) / total_staked;
+        let reward = stake_amount
+            .checked_mul(rewards_pool)
+            .and_then(|numerator| numerator.checked_div(total_staked))
+            .ok_or(VaultError::AmountTooLarge)?;
 
         if reward <= 0 {
             return Err(VaultError::NoRewardsToClaim);
         }
 
+        if reward > rewards_pool {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        let new_pool = rewards_pool
+            .checked_sub(reward)
+            .ok_or(VaultError::InvalidAmount)?;
+
         // Track total claimed
         let already_claimed = storage::get_staker_rewards_claimed(&env, &staker);
-        let new_claimed = already_claimed + reward;
+        let new_claimed = already_claimed
+            .checked_add(reward)
+            .ok_or(VaultError::AmountTooLarge)?;
         storage::set_staker_rewards_claimed(&env, &staker, new_claimed);
+        storage::set_staker_rewards_claimed_generation(&env, &staker, pool_generation);
 
         // Reduce rewards pool
-        let new_pool = rewards_pool - reward;
         storage::set_rewards_pool(&env, new_pool);
 
         events::rewards_claimed(&env, &staker, reward);
         Ok(())
     }
 
-    /// Return a page of registered stakers and the total number registered.
-    pub fn get_stakers(env: Env, offset: u32, limit: u32) -> Page {
-        let (items, total_count) = storage::get_stakers_page(&env, offset, limit);
-        Page { items, total_count }
+    /// Get the cumulative rewards already claimed by a staker.
+    pub fn get_staker_rewards_claimed(env: Env, staker: Address) -> i128 {
+        storage::get_staker_rewards_claimed(&env, &staker)
     }
 
-    /// Return a staker's stake, earned and claimed rewards, and registration time.
-    pub fn get_staker_info(env: Env, staker: Address) -> Option<StakerInfo> {
-        let stake_amount = storage::get_staker(&env, &staker)?;
-        let rewards_claimed = storage::get_staker_rewards_claimed(&env, &staker);
-        let rewards_pool = storage::get_rewards_pool(&env);
-        let total_staked = storage::get_total_staked(&env);
-        let currently_earned = if total_staked > 0 && rewards_pool > 0 {
-            stake_amount.saturating_mul(rewards_pool) / total_staked
-        } else {
-            0
-        };
-
-        Some(StakerInfo {
-            stake_amount,
-            rewards_earned: rewards_claimed.saturating_add(currently_earned),
-            rewards_claimed,
-            registration_timestamp: storage::get_staker_registration_timestamp(&env, &staker)
-                .unwrap_or(0),
-        })
+    /// Get the current unclaimed rewards pool.
+    pub fn get_rewards_pool(env: Env) -> i128 {
+        storage::get_rewards_pool(&env)
     }
 
     // ================================================================
@@ -4724,6 +4778,56 @@ fn check_sustainability_milestones(
         storage::get_staker_pool_balance(&env, &token)
     }
 
+    /// Generate a sustainability report for `depositor`.
+    ///
+    /// The report timestamp is taken from `env.ledger().timestamp()` at call
+    /// time, so it always reflects the current ledger close time and is never
+    /// cached from a previous query.
+    ///
+    /// Aggregated totals use checked addition; on overflow the affected total
+    /// is clamped to `i128::MAX` rather than panicking, so the report is always
+    /// returned.
+    pub fn generate_sustainability_report(
+        env: Env,
+        depositor: Address,
+    ) -> SustainabilityReport {
+        let total_carbon = storage::get_total_carbon_footprint(&env, &depositor);
+        let total_offset = storage::get_total_carbon_offset(&env, &depositor);
+
+        let deposit_ids = storage::get_deposit_ids(&env, &depositor);
+        let mut recomputed_carbon: i128 = 0;
+        let mut recomputed_offset: i128 = 0;
+        let mut total_renewable: u64 = 0;
+        let mut count: u64 = 0;
+        for id in deposit_ids.iter() {
+            if let Some(m) = storage::get_sustainability_metrics_readonly(&env, &depositor, id) {
+                recomputed_carbon = recomputed_carbon
+                    .checked_add(m.carbon_footprint)
+                    .unwrap_or(i128::MAX);
+                recomputed_offset = recomputed_offset
+                    .checked_add(m.carbon_offset_grams)
+                    .unwrap_or(i128::MAX);
+                total_renewable = total_renewable.saturating_add(m.renewable_energy_percent as u64);
+                count = count.saturating_add(1);
+            }
+        }
+
+        let average_renewable = if count > 0 {
+            ((total_renewable / count) as u32).min(100)
+        } else {
+            0
+        };
+
+        SustainabilityReport {
+            depositor,
+            total_carbon_footprint: total_carbon.max(recomputed_carbon),
+            total_carbon_offset: total_offset.max(recomputed_offset),
+            average_renewable_energy_percent: average_renewable,
+            deposit_count: count as u32,
+            report_timestamp: env.ledger().timestamp(),
+        }
+    }
+
     /// Transfer the full staker-pool balance for `token` to `recipient`.
     ///
     /// `recipient` must sign the transaction.  Any address may claim —
@@ -5040,6 +5144,83 @@ impl SafeHaven {
         market_id: u32,
     ) -> Option<crate::prediction_market_types::MarketWithOutcomes> {
         crate::prediction_market::get_market_with_outcomes(&env, market_id)
+    }
+}
+
+#[cfg(test)]
+mod sustainability_precision_tests {
+    use super::*;
+
+    /// Max deposit (10^15) × max lock (157_788_000 s) must not overflow i128.
+    #[test]
+    fn carbon_footprint_max_values_no_overflow() {
+        let amount: i128 = 1_000_000_000_000_000; // 10^15
+        let duration: u64 = 157_788_000; // ~5 years in seconds
+        let footprint = calculate_carbon_footprint(amount, duration).unwrap();
+        assert!(footprint > 0);
+        // Expected ≈ 1.57788e23 × baseline; must be well below i128::MAX.
+        assert!(footprint < i128::MAX);
+        let expected = amount
+            .checked_mul(duration as i128)
+            .unwrap()
+            .checked_mul(crate::constants::CARBON_BASELINE_PER_UNIT_SECOND)
+            .unwrap();
+        assert_eq!(footprint, expected);
+    }
+
+    /// Offset for the max footprint must also stay within i128.
+    #[test]
+    fn carbon_offset_max_values_no_overflow() {
+        let amount: i128 = 1_000_000_000_000_000;
+        let duration: u64 = 157_788_000;
+        let footprint = calculate_carbon_footprint(amount, duration).unwrap();
+        let offset = calculate_carbon_offset(footprint, 10_000).unwrap();
+        assert_eq!(offset, footprint); // 100% penalty → full offset
+        assert!(offset < i128::MAX);
+    }
+
+    /// Small values truncate consistently (integer division toward zero).
+    #[test]
+    fn carbon_offset_small_value_rounding() {
+        // 1 × 1 bps / 10_000 = 0 (truncated)
+        assert_eq!(calculate_carbon_offset(1, 1).unwrap(), 0);
+        // 9_999 × 1 / 10_000 = 0
+        assert_eq!(calculate_carbon_offset(9_999, 1).unwrap(), 0);
+        // 10_000 × 1 / 10_000 = 1
+        assert_eq!(calculate_carbon_offset(10_000, 1).unwrap(), 1);
+        // 15_000 × 1 / 10_000 = 1 (truncated)
+        assert_eq!(calculate_carbon_offset(15_000, 1).unwrap(), 1);
+    }
+
+    /// Zero inputs yield zero without panicking.
+    #[test]
+    fn carbon_zero_values() {
+        assert_eq!(calculate_carbon_footprint(0, 100).unwrap(), 0);
+        assert_eq!(calculate_carbon_footprint(100, 0).unwrap(), 0);
+        assert_eq!(calculate_carbon_footprint(0, 0).unwrap(), 0);
+        assert_eq!(calculate_carbon_offset(0, 500).unwrap(), 0);
+        assert_eq!(calculate_carbon_offset(100, 0).unwrap(), 0);
+    }
+
+    /// Negative amounts are treated as zero (defensive, no panic).
+    #[test]
+    fn carbon_negative_amount_no_panic() {
+        assert_eq!(calculate_carbon_footprint(-1, 100).unwrap(), 0);
+        assert_eq!(calculate_carbon_offset(-1, 500).unwrap(), 0);
+    }
+
+    /// Extreme inputs that would overflow return CarbonOverflow, not panic.
+    #[test]
+    fn carbon_footprint_overflow_returns_error() {
+        let result = calculate_carbon_footprint(i128::MAX, u64::MAX);
+        assert_eq!(result, Err(VaultError::CarbonOverflow));
+    }
+
+    /// Offset overflow returns CarbonOverflow, not panic.
+    #[test]
+    fn carbon_offset_overflow_returns_error() {
+        let result = calculate_carbon_offset(i128::MAX, 10_000);
+        assert_eq!(result, Err(VaultError::CarbonOverflow));
     }
 }
 

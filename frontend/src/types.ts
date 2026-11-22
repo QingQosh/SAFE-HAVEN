@@ -80,3 +80,33 @@ export type SigningResult =
   | { signed: true; xdr: string }           // Successfully signed
   | { signed: false; rejected: true }       // User rejected the signing request
   | { signed: false; rejected: false; error: string } // Signing failed with error
+
+/**
+ * Mirrors the Rust SustainabilityMetrics struct.
+ *
+ * Returned by `get_sustainability_metrics(deposit_id)` for a single deposit.
+ * All carbon values are expressed in grams of CO2 equivalent (g CO2e).
+ */
+export interface SustainabilityMetrics {
+  depositId: number
+  depositor: string                  // Stellar address
+  carbonFootprint: bigint            // grams CO2e
+  renewableEnergyPercent: number     // 0–100
+  carbonOffsetGrams: bigint          // grams CO2e
+  timestamp: number                  // Unix timestamp (seconds)
+}
+
+/**
+ * Mirrors the Rust SustainabilityReport struct.
+ *
+ * Returned by `generate_sustainability_report(depositor)` for a depositor.
+ * All carbon values are expressed in grams of CO2 equivalent (g CO2e).
+ */
+export interface SustainabilityReport {
+  depositor: string                        // Stellar address
+  totalCarbonFootprint: bigint             // grams CO2e
+  averageRenewableEnergyPercent: number    // 0–100
+  totalCarbonOffset: bigint                // grams CO2e
+  activeDepositCount: number
+  reportTimestamp: number                  // live ledger timestamp (seconds)
+}
