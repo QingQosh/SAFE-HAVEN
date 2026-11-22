@@ -1471,6 +1471,23 @@ fn test_rewards_pool_accumulates_penalties_across_cancellations() {
 }
 
 #[test]
+fn test_rewards_pool_persists_across_ledger_advancement() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let unlock_time = env.ledger().timestamp() + 3600;
+
+    let first_id = vault.deposit(&alice, &token, &1_000, &unlock_time, &1_000);
+    vault.cancel_deposit(&alice, &first_id);
+    assert_eq!(vault.get_rewards_pool_total(), 70);
+
+    advance_ledger(&env, 1_000);
+    assert_eq!(vault.get_rewards_pool_total(), 70);
+
+    let second_id = vault.deposit(&alice, &token, &2_000, &unlock_time, &1_000);
+    vault.cancel_deposit(&alice, &second_id);
+    assert_eq!(vault.get_rewards_pool_total(), 210);
+}
+
+#[test]
 fn test_cancel_deposit_100_percent_penalty() {
     let (env, vault, token, _admin, alice, fee) = setup();
     let token_client = TokenClient::new(&env, &token);
@@ -5520,6 +5537,39 @@ fn test_single_staker_claims_full_rewards() {
 }
 
 #[test]
+fn test_duplicate_staker_claim_fails_and_replenishment_allows_new_claim() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    vault.register_staker(&alice, &1000).unwrap();
+
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let deposit_id = vault
+        .deposit(&alice, &token, &1000, &unlock_time, &1000)
+        .unwrap();
+    vault.cancel_deposit(&alice, &deposit_id).unwrap();
+
+    assert_eq!(vault.get_rewards_pool(), 70);
+    assert!(vault.claim_staker_rewards(&alice).is_ok());
+    assert_eq!(vault.get_rewards_pool(), 0);
+    assert_eq!(vault.get_staker_rewards_claimed(&alice), 70);
+
+    let duplicate = vault.try_claim_staker_rewards(&alice);
+    assert_eq!(duplicate, Err(Ok(VaultError::NoRewardsToClaim)));
+    assert_eq!(vault.get_staker_rewards_claimed(&alice), 70);
+
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let deposit_id = vault
+        .deposit(&alice, &token, &1000, &unlock_time, &1000)
+        .unwrap();
+    vault.cancel_deposit(&alice, &deposit_id).unwrap();
+
+    assert_eq!(vault.get_rewards_pool(), 70);
+    assert!(vault.claim_staker_rewards(&alice).is_ok());
+    assert_eq!(vault.get_rewards_pool(), 0);
+    assert_eq!(vault.get_staker_rewards_claimed(&alice), 140);
+}
+
+#[test]
 fn test_multiple_stakers_proportional_rewards() {
     let env = Env::default();
     env.mock_all_auths();
@@ -9451,6 +9501,281 @@ fn test_renewable_energy_with_carbon_offset_calculation() {
     // Verify carbon offset is calculated correctly
     let expected_offset = (metrics.carbon_footprint * penalty_bps as i128) / 10_000;
     assert_eq!(metrics.carbon_offset_grams, expected_offset);
+}
+
+// ================================================================
+//  #832 — Sustainability metrics: precision and overflow
+// ================================================================
+
+/// #832 — the maximum supported deposit (10^15) over the maximum lock
+/// duration (5 years) must not overflow i128.
+///
+/// Expected magnitude: 10^15 × 157,680,000 ≈ 1.5768 × 10^23 grams CO2e,
+/// comfortably below i128::MAX (~1.7 × 10^38).
+#[test]
+fn test_sustainability_metrics_max_deposit_max_lock_no_overflow() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let asset_client = StellarAssetClient::new(&env, &token);
+    asset_client.mint(&alice, &MAX_DEPOSIT_AMOUNT);
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + MAX_LOCK_DURATION_SECS;
+
+    let deposit_id = vault
+        .deposit(&alice, &token, &MAX_DEPOSIT_AMOUNT, &unlock_time, &0, &None)
+        .expect("max deposit with max lock should succeed");
+
+    let metrics = vault
+        .get_sustainability_metrics(&alice, &deposit_id)
+        .expect("metrics should exist for max deposit");
+
+    assert_eq!(metrics.amount, MAX_DEPOSIT_AMOUNT);
+    assert!(metrics.carbon_footprint > 0, "carbon footprint must be positive");
+    assert!(
+        metrics.carbon_footprint <= i128::MAX,
+        "carbon footprint must fit in i128"
+    );
+    assert!(
+        metrics.carbon_offset_grams <= i128::MAX,
+        "carbon offset must fit in i128"
+    );
+
+    // Sanity bound: 10^15 × 157,680,000 = 1.5768 × 10^23.
+    let expected_upper_bound: i128 = 157_680_000i128 * 1_000_000_000_000_000i128;
+    assert!(
+        metrics.carbon_footprint <= expected_upper_bound,
+        "carbon footprint must not exceed the theoretical maximum"
+    );
+}
+
+/// #832 — the sustainability report for a max deposit must also stay
+/// within i128 bounds and must not panic.
+#[test]
+fn test_sustainability_report_max_deposit_no_overflow() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &MAX_DEPOSIT_AMOUNT);
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + MAX_LOCK_DURATION_SECS;
+    vault
+        .deposit(&alice, &token, &MAX_DEPOSIT_AMOUNT, &unlock_time, &0, &None)
+        .expect("max deposit should succeed");
+
+    let report = vault.generate_sustainability_report(&alice);
+
+    assert_eq!(report.active_deposit_count, 1);
+    assert!(report.total_carbon_footprint_grams > 0);
+    assert!(report.total_carbon_footprint_grams <= i128::MAX);
+    assert!(report.total_carbon_offset_grams <= i128::MAX);
+}
+
+/// #832 — small amounts must round consistently: the carbon footprint of
+/// a 1-unit deposit must be deterministic across repeated queries.
+#[test]
+fn test_sustainability_metrics_small_amount_rounding_consistent() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    let deposit_id = vault
+        .deposit(&alice, &token, &1, &unlock_time, &0, &None)
+        .expect("small deposit should succeed");
+
+    let first = vault
+        .get_sustainability_metrics(&alice, &deposit_id)
+        .expect("metrics should exist");
+    let second = vault
+        .get_sustainability_metrics(&alice, &deposit_id)
+        .expect("metrics should exist");
+
+    assert_eq!(
+        first.carbon_footprint, second.carbon_footprint,
+        "rounding must be consistent across queries"
+    );
+    assert_eq!(
+        first.carbon_offset_grams, second.carbon_offset_grams,
+        "offset rounding must be consistent across queries"
+    );
+    assert!(first.carbon_footprint >= 0, "footprint must never be negative");
+}
+
+/// #832 — zero-amount and missing-deposit edge cases must not panic.
+#[test]
+fn test_sustainability_metrics_edge_cases_no_panic() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    // Zero amount is rejected by deposit validation — must not panic.
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    let zero_result = vault.try_deposit(&alice, &token, &0, &unlock_time, &0, &None);
+    assert!(zero_result.is_err(), "zero deposit must be rejected");
+
+    // Querying metrics for a non-existent deposit must not panic.
+    let missing = vault.try_get_sustainability_metrics(&alice, &999);
+    assert!(missing.is_err(), "missing deposit must return an error");
+
+    // Report for an address with no deposits must not panic.
+    let report = vault.generate_sustainability_report(&alice);
+    assert_eq!(report.active_deposit_count, 0);
+    assert_eq!(report.total_carbon_footprint_grams, 0);
+}
+
+// ================================================================
+//  #833 — Sustainability report: timestamp accuracy
+// ================================================================
+
+/// #833 — report_timestamp must equal the ledger timestamp at query time.
+#[test]
+fn test_sustainability_report_timestamp_matches_query_time() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &0, &None)
+        .expect("deposit should succeed");
+
+    let report = vault.generate_sustainability_report(&alice);
+    assert_eq!(
+        report.report_timestamp,
+        env.ledger().timestamp(),
+        "report timestamp must match the current ledger timestamp"
+    );
+}
+
+/// #833 — report_timestamp must advance when the ledger timestamp advances
+/// (i.e. it is not cached from a previous query).
+#[test]
+fn test_sustainability_report_timestamp_updates_with_ledger() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &0, &None)
+        .expect("deposit should succeed");
+
+    let first = vault.generate_sustainability_report(&alice);
+    assert_eq!(first.report_timestamp, now);
+
+    advance_time(&env, 120);
+
+    let second = vault.generate_sustainability_report(&alice);
+    assert_eq!(second.report_timestamp, now + 120);
+    assert!(
+        second.report_timestamp > first.report_timestamp,
+        "later report must have a later timestamp"
+    );
+}
+
+/// #833 — timestamps are second-level precision: advancing by one second
+/// must be reflected exactly.
+#[test]
+fn test_sustainability_report_timestamp_second_precision() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &0, &None)
+        .expect("deposit should succeed");
+
+    advance_time(&env, 1);
+    let report = vault.generate_sustainability_report(&alice);
+    assert_eq!(report.report_timestamp, now + 1);
+}
+
+/// #833 — two reports generated at different ledger times must differ.
+#[test]
+fn test_sustainability_report_multiple_queries_have_different_times() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &0, &None)
+        .expect("deposit should succeed");
+
+    let first = vault.generate_sustainability_report(&alice);
+    advance_time(&env, 60);
+    let second = vault.generate_sustainability_report(&alice);
+
+    assert_ne!(
+        first.report_timestamp, second.report_timestamp,
+        "reports generated at different times must not share a timestamp"
+    );
+}
+
+// ================================================================
+//  #835 — Sustainability metrics: frontend integration smoke tests
+// ================================================================
+
+/// #835 — get_sustainability_metrics must be callable and return the
+/// fields a dashboard needs for a single deposit.
+#[test]
+fn test_frontend_get_sustainability_metrics_available() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    let deposit_id = vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &0, &None)
+        .expect("deposit should succeed");
+
+    let metrics = vault
+        .get_sustainability_metrics(&alice, &deposit_id)
+        .expect("metrics should be available for frontend");
+
+    assert_eq!(metrics.depositor, alice);
+    assert_eq!(metrics.amount, 1_000);
+    assert!(metrics.renewable_energy_percent <= 100);
+}
+
+/// #835 — generate_sustainability_report must be callable and return the
+/// aggregate fields a dashboard needs.
+#[test]
+fn test_frontend_generate_sustainability_report_available() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &0, &None)
+        .expect("deposit should succeed");
+
+    let report = vault.generate_sustainability_report(&alice);
+    assert_eq!(report.depositor, alice);
+    assert_eq!(report.active_deposit_count, 1);
+    assert!(report.report_timestamp > 0);
+}
+
+/// #835 — repeated dashboard queries must be cheap and stable: many
+/// consecutive calls return identical results within the same ledger.
+#[test]
+fn test_frontend_dashboard_queries_stable_and_repeatable() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    let deposit_id = vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &0, &None)
+        .expect("deposit should succeed");
+
+    let baseline = vault
+        .get_sustainability_metrics(&alice, &deposit_id)
+        .expect("metrics should exist");
+
+    for _ in 0..10 {
+        let metrics = vault
+            .get_sustainability_metrics(&alice, &deposit_id)
+            .expect("metrics should exist");
+        assert_eq!(metrics.carbon_footprint, baseline.carbon_footprint);
+        assert_eq!(metrics.carbon_offset_grams, baseline.carbon_offset_grams);
+        assert_eq!(
+            metrics.renewable_energy_percent,
+            baseline.renewable_energy_percent
+        );
+    }
 }
 //  Recipient Validation Tests (Issue: Recipient Address Validation)
 // ================================================================

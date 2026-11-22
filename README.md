@@ -98,6 +98,22 @@ See [`frontend/README.md`](./frontend/README.md) for the full frontend guide.
 
 See [`DISASTER_RECOVERY.md`](./DISASTER_RECOVERY.md) for disaster scenarios, recovery procedures, roles, and escalation rules.
 
+### API Documentation
+
+The contract exposes a comprehensive public API. Developers should start with these resources:
+
+| Document | Purpose |
+|----------|---------|
+| [`docs/API_COMPREHENSIVE.md`](./docs/API_COMPREHENSIVE.md) | **Complete API reference** — all endpoints, parameters, types, and error codes |
+| [`docs/API_EXAMPLES.md`](./docs/API_EXAMPLES.md) | **Ready-to-use code examples** — copy-pasteable CLI and TypeScript patterns for common workflows |
+| [`docs/API_QUICK_REFERENCE.md`](./docs/API_QUICK_REFERENCE.md) | **Quick lookup card** — function signatures, constants, common errors, checklists |
+| [`docs/API.md`](./docs/API.md) | **CLI-focused guide** — Soroban CLI examples for all operations |
+
+**Getting Started**:
+1. Read [`docs/API_QUICK_REFERENCE.md`](./docs/API_QUICK_REFERENCE.md) (5 min)
+2. Copy an example from [`docs/API_EXAMPLES.md`](./docs/API_EXAMPLES.md)
+3. Reference full details in [`docs/API_COMPREHENSIVE.md`](./docs/API_COMPREHENSIVE.md) as needed
+
 See [`MONITORING.md`](./MONITORING.md) for contract health checks, alert thresholds, storage/TTL monitoring, and failed-transaction observability.
 
 See [`LEGAL.md`](./LEGAL.md) for Terms of Service, Privacy Policy, disclaimers, GDPR compliance, data retention policy, and the on-chain audit trail reference.
