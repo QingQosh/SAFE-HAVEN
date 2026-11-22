@@ -3849,9 +3849,17 @@ fn test_withdraw_to_with_whitelist_and_compound_interest() {
 fn test_register_staker_success() {
     let (env, vault, _token, _admin, alice, _fee) = setup();
 
+    assert_eq!(
+        env.storage()
+            .persistent()
+            .get::<VaultKey, i128>(&VaultKey::TotalStaked),
+        Some(0)
+    );
+
     // Alice registers as a staker with stake amount 1000
     let result = vault.register_staker(&alice, &1000);
     assert!(result.is_ok());
+    assert_eq!(crate::storage::get_total_staked(&env), 1000);
 }
 
 #[test]
@@ -3880,9 +3888,11 @@ fn test_register_staker_updates_existing_stake() {
 
     // Register with 1000
     vault.register_staker(&alice, &1000).unwrap();
+    assert_eq!(crate::storage::get_total_staked(&env), 1000);
 
     // Update to 2000
     vault.register_staker(&alice, &2000).unwrap();
+    assert_eq!(crate::storage::get_total_staked(&env), 2000);
 
     // Verify event was emitted for second registration
     let events = env.events().all();
@@ -3924,7 +3934,51 @@ fn test_multiple_stakers_register() {
     vault.register_staker(&bob, &2000).unwrap();
     vault.register_staker(&carol, &3000).unwrap();
 
-    // All registrations should succeed
+    assert_eq!(crate::storage::get_total_staked(&env), 6000);
+    let registered_sum = crate::storage::get_staker(&env, &alice)
+        .unwrap()
+        .checked_add(crate::storage::get_staker(&env, &bob).unwrap())
+        .and_then(|sum| {
+            sum.checked_add(crate::storage::get_staker(&env, &carol).unwrap())
+        })
+        .unwrap();
+    assert_eq!(registered_sum, crate::storage::get_total_staked(&env));
+}
+
+#[test]
+fn test_withdraw_stake_updates_total_and_removes_zero_balance() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+    let bob = Address::generate(&env);
+
+    vault.register_staker(&alice, &1000).unwrap();
+    vault.register_staker(&bob, &500).unwrap();
+
+    vault.withdraw_stake(&alice, &400).unwrap();
+    assert_eq!(crate::storage::get_staker(&env, &alice), Some(600));
+    assert_eq!(crate::storage::get_total_staked(&env), 1100);
+
+    vault.withdraw_stake(&alice, &600).unwrap();
+    assert_eq!(crate::storage::get_staker(&env, &alice), None);
+    assert_eq!(crate::storage::get_total_staked(&env), 500);
+
+    vault.withdraw_stake(&bob, &500).unwrap();
+    assert_eq!(crate::storage::get_total_staked(&env), 0);
+}
+
+#[test]
+fn test_withdraw_stake_rejects_invalid_amounts_without_changing_total() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+    vault.register_staker(&alice, &1000).unwrap();
+
+    assert_eq!(
+        vault.try_withdraw_stake(&alice, &0),
+        Err(Ok(VaultError::InvalidStakeAmount))
+    );
+    assert_eq!(
+        vault.try_withdraw_stake(&alice, &1001),
+        Err(Ok(VaultError::InsufficientStakeAmount))
+    );
+    assert_eq!(crate::storage::get_total_staked(&env), 1000);
 }
 
 #[test]

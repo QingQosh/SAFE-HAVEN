@@ -305,6 +305,13 @@ vault.register_staker(&alice, &1000)?;
 vault.register_staker(&alice, &2000)?;
 ```
 
+#### `withdraw_stake(staker, amount) -> Result<(), VaultError>`
+Reduce or remove a staker's registered amount. This updates `total_staked`; as staking is accounting-only, it does not transfer tokens.
+
+- Requires authentication from the staker.
+- The amount must be positive and no greater than the current stake.
+- Withdrawing the full stake removes the active registry entry.
+
 #### `claim_staker_rewards(staker) -> Result<(), VaultError>`
 Claim accumulated rewards from the staker rewards pool.
 
@@ -508,10 +515,11 @@ The contract emits `SustainabilityMilestone` events when depositors achieve envi
 | 13 | `VaultAlreadyUnlocked` | `cancel_deposit` called after the lock has already expired |
 | 14 | `MissingFeeRecipient` | penalty_bps > 0 but no fee_recipient is configured |
 | 15 | `AlreadyInitialized` | `initialize` was called on an already-initialized contract |
-| 16 | `InvalidStakeAmount` | Staker registration with amount <= 0 |
-| 17 | `StakerNotFound` | Staker not registered in the staker registry |
-| 18 | `NoRewardsToClaim` | Rewards pool is empty or staker's share rounds to zero |
-| 19 | `InsufficientStakeAmount` | Insufficient staked amount for operation |
+| 27 | `InvalidStakeAmount` | Stake registration or withdrawal amount <= 0 |
+| 28 | `StakerNotFound` | Staker not registered in the staker registry |
+| 29 | `NoRewardsToClaim` | Rewards pool is empty or staker's share rounds to zero |
+| 30 | `InsufficientStakeAmount` | Withdrawal exceeds the staker's registered stake |
+| 31 | `ArithmeticOverflow` | Stake or reward accounting arithmetic overflowed |
 
 ---
 

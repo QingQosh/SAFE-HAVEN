@@ -384,6 +384,7 @@ impl SafeHaven {
         storage::set_admin(&env, &admin);
         storage::set_initialized(&env);
         storage::set_fee_recipient(&env, &fee_recipient);
+        storage::set_total_staked(&env, 0);
 
         if let Some(v) = max_deposit {
             if v <= 0 {
@@ -1612,11 +1613,13 @@ impl SafeHaven {
         let current_total = storage::get_total_staked(&env);
         let old_stake = storage::get_staker(&env, &staker).unwrap_or(0);
 
-        // Update staker's stake amount
-        storage::set_staker(&env, &staker, amount);
+        let new_total = current_total
+            .checked_sub(old_stake)
+            .and_then(|total| total.checked_add(amount))
+            .ok_or(VaultError::ArithmeticOverflow)?;
 
-        // Update total staked
-        let new_total = current_total - old_stake + amount;
+        // Update staker's stake amount and total atomically within this invocation.
+        storage::set_staker(&env, &staker, amount);
         storage::set_total_staked(&env, new_total);
 
         // Add to staker list if first-time registration
@@ -1625,6 +1628,38 @@ impl SafeHaven {
         }
 
         events::staker_registered(&env, &staker, amount);
+        Ok(())
+    }
+
+    /// Withdraw part or all of a staker's registered amount from the registry.
+    ///
+    /// Stake registration is accounting-only; this function does not transfer tokens.
+    pub fn withdraw_stake(env: Env, staker: Address, amount: i128) -> Result<(), VaultError> {
+        staker.require_auth();
+
+        if amount <= 0 {
+            return Err(VaultError::InvalidStakeAmount);
+        }
+
+        let current_stake =
+            storage::get_staker(&env, &staker).ok_or(VaultError::StakerNotFound)?;
+        if amount > current_stake {
+            return Err(VaultError::InsufficientStakeAmount);
+        }
+
+        let new_stake = current_stake
+            .checked_sub(amount)
+            .ok_or(VaultError::ArithmeticOverflow)?;
+        let new_total = storage::get_total_staked(&env)
+            .checked_sub(amount)
+            .ok_or(VaultError::ArithmeticOverflow)?;
+
+        if new_stake == 0 {
+            storage::remove_staker(&env, &staker);
+        } else {
+            storage::set_staker(&env, &staker, new_stake);
+        }
+        storage::set_total_staked(&env, new_total);
         Ok(())
     }
 
@@ -1654,7 +1689,10 @@ impl SafeHaven {
 
         // Calculate staker's proportional share
         // reward = (stake_amount / total_staked) * rewards_pool
-        let reward = (stake_amount * rewards_pool) / total_staked;
+        let reward = stake_amount
+            .checked_mul(rewards_pool)
+            .ok_or(VaultError::ArithmeticOverflow)?
+            / total_staked;
 
         if reward <= 0 {
             return Err(VaultError::NoRewardsToClaim);
@@ -1662,11 +1700,15 @@ impl SafeHaven {
 
         // Track total claimed
         let already_claimed = storage::get_staker_rewards_claimed(&env, &staker);
-        let new_claimed = already_claimed + reward;
+        let new_claimed = already_claimed
+            .checked_add(reward)
+            .ok_or(VaultError::ArithmeticOverflow)?;
         storage::set_staker_rewards_claimed(&env, &staker, new_claimed);
 
         // Reduce rewards pool
-        let new_pool = rewards_pool - reward;
+        let new_pool = rewards_pool
+            .checked_sub(reward)
+            .ok_or(VaultError::ArithmeticOverflow)?;
         storage::set_rewards_pool(&env, new_pool);
 
         events::rewards_claimed(&env, &staker, reward);

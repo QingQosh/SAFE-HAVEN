@@ -152,6 +152,20 @@ soroban contract invoke \
   --deposit_id 0
 ```
 
+## Staker registry
+
+### register_staker(staker, amount)
+
+Register a positive stake amount or update the staker's existing amount. The staker must authorize the call. `total_staked` tracks the sum of all active registered stakes.
+
+### withdraw_stake(staker, amount)
+
+Reduce or remove the staker's registered amount. The staker must authorize the call, and `amount` must be positive and no greater than the current stake. A full withdrawal removes the active registry entry. This accounting-only operation does not transfer tokens.
+
+### claim_staker_rewards(staker)
+
+Claim the staker's proportional share of the rewards pool, calculated from their current registered stake and `total_staked`. The staker must authorize the call.
+
 ## Admin operations
 
 ### emergency_withdraw(admin, depositor, deposit_id)

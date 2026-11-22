@@ -916,6 +916,12 @@ pub fn get_staker(env: &Env, staker: &Address) -> Option<i128> {
     env.storage().persistent().get(&key)
 }
 
+/// Remove a staker's active stake entry. The historical staker list is append-only.
+pub fn remove_staker(env: &Env, staker: &Address) {
+    let key = VaultKey::Staker(staker.clone());
+    env.storage().persistent().remove(&key);
+}
+
 /// Get staker list (append-only, may contain stale entries after removes).
 fn get_staker_list(env: &Env) -> Vec<Address> {
     let key = VaultKey::StakerList;
