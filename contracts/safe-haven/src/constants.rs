@@ -7,14 +7,35 @@ use crate::storage::LEDGER_SECONDS;
 /// Maximum deposit amount (in stroops or token base units).
 pub const MAX_DEPOSIT_AMOUNT: i128 = 1_000_000_000_000_000;
 
-/// Maximum lock duration in seconds (~5 years).
+/// Maximum lock duration in seconds: exactly 5 years (5 × 365.25 × 24 × 3600).
+///
+/// This cap applies to all deposit types — `deposit`, `deposit_for`,
+/// `deposit_with_compound_interest`, and `deposit_by_ledger`.  It prevents
+/// lock durations that would overflow ledger-TTL arithmetic and keeps the
+/// maximum storage-bump window manageable.
+///
+/// Computed as: 5 * 365.25 * 24 * 3600 = 157,788,000 seconds.
 pub const MAX_LOCK_DURATION_SECS: u64 = 157_788_000;
 
 /// Minimum lock duration: prevent trivial, pointless vaults that waste storage.
 pub const MIN_LOCK_DURATION_SECS: u64 = 60;
 
-/// Minimum number of ledgers required for a ledger-based deposit.
+/// Minimum number of ledgers required for a ledger-based deposit (~60 seconds at 5 s/ledger).
 pub const MIN_LOCK_LEDGERS: u32 = (MIN_LOCK_DURATION_SECS / LEDGER_SECONDS) as u32;
+
+pub const EPOCH_SIZE_LEDGERS: u32 = 1_440;
+pub const WITHDRAWAL_LIMIT_PER_EPOCH: i128 = 50_000_000;
+pub const RENEWABLE_ENERGY_BASELINE: u32 = 50;
+pub const CARBON_BASELINE_PER_UNIT_SECOND: i128 = 1;
+/// Maximum number of ledgers allowed for a ledger-based deposit, equivalent to
+/// `MAX_LOCK_DURATION_SECS` converted at the nominal 5-second ledger rate.
+///
+/// This is the ledger-domain counterpart to `MAX_LOCK_DURATION_SECS` and is
+/// used by `deposit_by_ledger` to enforce a 5-year upper bound on the lock
+/// duration (`ledger_gap <= MAX_LOCK_LEDGERS`).
+///
+/// Computed as: 157_788_000 / 5 = 31_557_600 ledgers.
+pub const MAX_LOCK_LEDGERS: u32 = (MAX_LOCK_DURATION_SECS / LEDGER_SECONDS) as u32;
 
 pub const UPGRADE_TIMELOCK_SECS: u64 = 14 * 24 * 60 * 60;
 pub const MIN_UPGRADE_APPROVALS: u32 = 3;

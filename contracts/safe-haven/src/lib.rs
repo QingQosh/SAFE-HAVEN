@@ -14,7 +14,8 @@ mod constants;
 mod contract;
 mod errors;
 mod events;
-mod nft;
+mod mev_detection;
+mod mev_integration;
 mod storage;
 mod types;
 
@@ -33,7 +34,8 @@ pub use constants::{
 pub use types::{
     CircuitBreakerActivation, DepositSubscription, DepositType, MultiTokenVaultEntry, Page,
     SubscriptionExecution, SubscriptionStats, TaxLossHarvest, TokenDeposit, STORAGE_VERSION,
-    MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER, MAX_TOKENS_PER_DEPOSIT,
+    MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER, MAX_TOKENS_PER_DEPOSIT, BatchWithdrawalResult,
+    WithdrawalResult, StakerInfo,
 };
 pub use pq::{ML_DSA_PUBLIC_KEY_BYTES, ML_DSA_SIGNATURE_BYTES};
 
@@ -42,9 +44,17 @@ pub use contract::SafeHavenClient;
 
 // Prediction Market exports
 pub use prediction_market_types::{
-    PredictionMarket, MarketOutcome, Bet, MarketStatus, MarketConfig,
+    PredictionMarket, MarketOutcome, MarketWithOutcomes, Bet, MarketStatus, MarketConfig,
 };
 pub use prediction_market_errors::PredictionMarketError;
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+#[cfg(test)]
+
+#[cfg(test)]
+mod smart_wallet_tests;
+mod test_deposit_id_counter;
+mod prediction_market_test;

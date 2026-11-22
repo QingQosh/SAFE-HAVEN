@@ -22,6 +22,11 @@ pub fn initialize_markets(
 ) -> Result<(), PredictionMarketError> {
     admin.require_auth();
 
+    // Prevent re-initialization
+    if storage::is_pm_initialized(env) {
+        return Err(PredictionMarketError::AlreadyInitialized);
+    }
+
     // Validate fee
     if default_fee_bps > MAX_FEE_BPS {
         return Err(PredictionMarketError::InvalidFeeBps);
@@ -37,6 +42,7 @@ pub fn initialize_markets(
     };
 
     storage::set_market_config(env, &config);
+    storage::set_pm_initialized(env);
     Ok(())
 }
 
@@ -124,7 +130,9 @@ pub fn create_market(
 
     storage::set_market(env, &market);
 
-    // Create outcomes
+    // Create outcomes and persist the ordered names list (Issue #100)
+    storage::set_outcome_names_list(env, market_id, &outcome_names);
+
     for (idx, name) in outcome_names.iter().enumerate() {
         let outcome = MarketOutcome {
             outcome_id: idx as u32,
@@ -168,7 +176,7 @@ pub fn place_bet(
 
     // Check market is open
     if market.status != MarketStatus::Open {
-        return Err(PredictionMarketError::BettingClosed);
+        return Err(PredictionMarketError::MarketNotOpen);
     }
 
     // Check betting deadline
@@ -185,9 +193,8 @@ pub fn place_bet(
     let mut outcome = storage::get_outcome(env, market_id, outcome_id)
         .ok_or(PredictionMarketError::InvalidOutcomeId)?;
 
-    // Check if user already bet on this outcome
-    let existing_bet = storage::get_bet_readonly(env, market_id, outcome_id, &bettor);
-    if existing_bet.is_some() {
+    // Check if user already bet on this outcome in the market
+    if storage::has_user_bet_on_outcome(env, &bettor, market_id, outcome_id) {
         return Err(PredictionMarketError::AlreadyBetOnOutcome);
     }
 
@@ -212,16 +219,15 @@ pub fn place_bet(
     outcome.bettor_count = outcome.bettor_count.saturating_add(1);
     storage::set_outcome(env, market_id, &outcome);
 
+    // Track the bettor's outcome membership in this market so duplicates are prevented explicitly.
+    storage::add_user_market_outcome(env, &bettor, market_id, outcome_id);
+
     // Update market
     market.total_pool = market.total_pool.saturating_add(amount);
-    if existing_bet.is_none() {
-        // Only increment bettor count if this is user's first bet on this market
-        let user_bet_key = format!("pmub_{}_{}", market_id, bettor);
-        let _first_bet = env.storage().persistent().get::<_, Option<bool>>(&soroban_sdk::Symbol::from_str(env, &user_bet_key));
-        if _first_bet.is_none() {
-            market.bettor_count = market.bettor_count.saturating_add(1);
-            env.storage().persistent().set(&soroban_sdk::Symbol::from_str(env, &user_bet_key), &true);
-        }
+    let market_outcomes = storage::get_user_market_outcomes(env, &bettor, market_id)
+        .unwrap_or_else(|| Vec::new(env));
+    if market_outcomes.len() == 1 {
+        market.bettor_count = market.bettor_count.saturating_add(1);
     }
     storage::set_market(env, &market);
 
@@ -442,8 +448,14 @@ pub fn cancel_market(
     let mut market = storage::get_market(env, market_id)
         .ok_or(PredictionMarketError::MarketNotFound)?;
 
-    if market.status == MarketStatus::Resolved {
-        return Err(PredictionMarketError::MarketAlreadyResolved);
+    match market.status {
+        MarketStatus::Open | MarketStatus::Closed => {}
+        MarketStatus::Resolved => {
+            return Err(PredictionMarketError::MarketAlreadyResolved);
+        }
+        MarketStatus::Cancelled => {
+            return Err(PredictionMarketError::InvalidMarketStatus);
+        }
     }
 
     market.status = MarketStatus::Cancelled;
@@ -513,8 +525,25 @@ pub fn get_bet_details(
     storage::get_bet_readonly(env, market_id, outcome_id, bettor)
 }
 
+/// Get a market together with its ordered list of outcomes (Issue #100).
+///
+/// Returns `None` if the market does not exist.
+/// The `outcomes` field is ordered by `outcome_id` (0, 1, 2 …) and its
+/// length equals `market.outcome_count`, so callers can index directly:
+///
+/// ```
+/// if let Some(mwo) = get_market_with_outcomes(env, 1) {
+///     let first_outcome = mwo.outcomes.get(0); // outcome_id 0
+/// }
+/// ```
+pub fn get_market_with_outcomes(env: &Env, market_id: u32) -> Option<MarketWithOutcomes> {
+    let market = storage::get_market_readonly(env, market_id)?;
+    let outcomes = storage::get_market_outcomes(env, market_id, market.outcome_count);
+    Some(MarketWithOutcomes { market, outcomes })
 // Helper for readonly outcome access
 fn get_outcome_readonly(env: &Env, market_id: u32, outcome_id: u32) -> Option<MarketOutcome> {
-    let key = soroban_sdk::Symbol::from_str(env, &format!("pmo_{}_{}", market_id, outcome_id));
+    let key = soroban_sdk::Symbol::new(env, &format!("pmo_{}_{}", market_id, outcome_id));
     env.storage().persistent().get(&key)
 }
+
+// Helper for readonly outcome access is provided by storage::get_outcome_readonly

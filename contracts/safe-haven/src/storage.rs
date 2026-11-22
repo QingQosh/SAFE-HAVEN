@@ -1,5 +1,9 @@
 use soroban_sdk::{token, Address, Bytes, Env, Vec};
 
+use crate::types::{VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS};
+use soroban_sdk::{Env, Bytes};
+use crate::types::{DepositSubscription, MultiTokenVaultEntry, SubscriptionExecution, SubscriptionStats, TaxLossHarvest, VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS, SustainabilityMetrics};
+use crate::types::{MultiTokenVaultEntry, VaultEntry, VaultKey, LedgerVaultEntry, SessionKeyEntry, MAX_LOCK_DURATION_SECS};
 use crate::types::{DepositSubscription, MultiTokenVaultEntry, SubscriptionExecution, SubscriptionStats, TaxLossHarvest, VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS};
 use crate::types::CircuitBreakerActivation;
 
@@ -931,18 +935,15 @@ fn get_staker_list(env: &Env) -> Vec<Address> {
         .unwrap_or_else(|| Vec::new(env))
 }
 
-/// Save the staker list.
-fn save_staker_list(env: &Env, stakers: &Vec<Address>) {
-    let key = VaultKey::StakerList;
-    env.storage().persistent().set(&key, stakers);
+fn get_indexed_staker_count(env: &Env) -> u32 {
     env.storage()
         .persistent()
-        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+        .get(&VaultKey::StakerCount)
+        .unwrap_or(0)
 }
 
-/// Add a staker to the staker list (O(1) if not already in list).
+/// Add a staker to the append-only list without rewriting the existing list.
 pub fn add_staker_to_list(env: &Env, staker: &Address) {
-    // Check if already in list using StakerInList flag
     let in_list_key = VaultKey::StakerInList(staker.clone());
     if env
         .storage()
@@ -953,12 +954,20 @@ pub fn add_staker_to_list(env: &Env, staker: &Address) {
         return; // Already in list, skip
     }
 
-    // Add to list
-    let mut list = get_staker_list(env);
-    list.push_back(staker.clone());
-    save_staker_list(env, &list);
+    let count_key = VaultKey::StakerCount;
+    let index = get_indexed_staker_count(env);
+    let entry_key = VaultKey::StakerListEntry(index);
+    env.storage().persistent().set(&entry_key, staker);
+    env.storage()
+        .persistent()
+        .extend_ttl(&entry_key, BUMP_THRESHOLD, BUMP_TARGET);
 
-    // Mark as in list
+    let count = index.saturating_add(1);
+    env.storage().persistent().set(&count_key, &count);
+    env.storage()
+        .persistent()
+        .extend_ttl(&count_key, BUMP_THRESHOLD, BUMP_TARGET);
+
     env.storage().persistent().set(&in_list_key, &true);
     env.storage()
         .persistent()
@@ -1010,9 +1019,52 @@ pub fn set_staker_rewards_claimed(env: &Env, staker: &Address, amount: i128) {
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
-/// Get the staker list (may contain stale entries). Active check via `get_staker`.
+/// Get a page of stakers in registration order.
+pub fn get_stakers_page(env: &Env, offset: u32, limit: u32) -> (Vec<Address>, u32) {
+    let legacy = get_legacy_staker_list(env);
+    let legacy_count = legacy.len();
+    let indexed_count = get_indexed_staker_count(env);
+    let total_count = legacy_count.saturating_add(indexed_count);
+    let mut page = Vec::new(env);
+
+    if limit == 0 || offset >= total_count {
+        return (page, total_count);
+    }
+
+    let end = offset.saturating_add(limit).min(total_count);
+    for position in offset..end {
+        if position < legacy_count {
+            if let Some(staker) = legacy.get(position) {
+                page.push_back(staker);
+            }
+        } else {
+            let index = position.saturating_sub(legacy_count);
+            if let Some(staker) = env
+                .storage()
+                .persistent()
+                .get::<VaultKey, Address>(&VaultKey::StakerListEntry(index))
+            {
+                page.push_back(staker);
+            }
+        }
+    }
+
+    (page, total_count)
+}
+
+/// Get the complete staker list (may contain stale entries after removals).
 pub fn get_stakers_list(env: &Env) -> Vec<Address> {
-    get_staker_list(env)
+    let mut stakers = get_legacy_staker_list(env);
+    for index in 0..get_indexed_staker_count(env) {
+        if let Some(staker) = env
+            .storage()
+            .persistent()
+            .get::<VaultKey, Address>(&VaultKey::StakerListEntry(index))
+        {
+            stakers.push_back(staker);
+        }
+    }
+    stakers
 }
 
 // ----------------------------------------------------------------
@@ -1486,6 +1538,21 @@ pub fn set_milestone_bitmap(env: &Env, depositor: &Address, bitmap: u32) {
 }
 
 
+// ----------------------------------------------------------------
+//  Session key helpers
+// ----------------------------------------------------------------
+
+/// Get a session key entry by delegator and session key ID.
+pub fn get_session_key(env: &Env, delegator: &Address, key_id: u32) -> Option<SessionKeyEntry> {
+    env.storage()
+        .persistent()
+        .get::<VaultKey, SessionKeyEntry>(&VaultKey::SessionKey(delegator.clone(), key_id))
+}
+
+/// Set a session key entry.
+pub fn set_session_key(env: &Env, delegator: &Address, key_id: u32, entry: &SessionKeyEntry) {
+    let key = VaultKey::SessionKey(delegator.clone(), key_id);
+    env.storage().persistent().set(&key, entry);
 // ================================================================
 //  NFT Evolution helpers
 // ================================================================
@@ -1504,6 +1571,51 @@ pub fn set_nft_evolution(
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
+/// Remove a session key entry.
+pub fn delete_session_key(env: &Env, delegator: &Address, key_id: u32) {
+    let key = VaultKey::SessionKey(delegator.clone(), key_id);
+    env.storage().persistent().remove(&key);
+}
+
+/// Get the next session key ID for a delegator (and increment counter).
+pub fn get_and_increment_session_key_counter(env: &Env, delegator: &Address) -> u32 {
+    let counter_key = VaultKey::SessionKeyCounter(delegator.clone());
+    let current: u32 = env.storage()
+        .persistent()
+        .get::<VaultKey, u32>(&counter_key)
+        .unwrap_or(0);
+    let next_id = current.saturating_add(1);
+    env.storage().persistent().set(&counter_key, &next_id);
+    env.storage()
+        .persistent()
+        .extend_ttl(&counter_key, BUMP_THRESHOLD, BUMP_TARGET);
+    current
+}
+
+/// Get the active session key IDs for a delegator.
+pub fn get_active_session_key_ids(env: &Env, delegator: &Address) -> Vec<u32> {
+    let key = VaultKey::ActiveSessionKeyIds(delegator.clone());
+    env.storage()
+        .persistent()
+        .get::<VaultKey, Vec<u32>>(&key)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Set the active session key IDs for a delegator.
+pub fn set_active_session_key_ids(env: &Env, delegator: &Address, ids: &Vec<u32>) {
+    let key = VaultKey::ActiveSessionKeyIds(delegator.clone());
+    env.storage().persistent().set(&key, ids);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Add a session key ID to the active list for a delegator.
+pub fn add_active_session_key_id(env: &Env, delegator: &Address, key_id: u32) {
+    let mut ids = get_active_session_key_ids(env, delegator);
+    ids.push_back(key_id);
+    set_active_session_key_ids(env, delegator, &ids);
+}
 /// Retrieve an NFT evolution record (mutable path — extends TTL).
 pub fn get_nft_evolution(
     env: &Env,
@@ -1533,5 +1645,90 @@ pub fn get_nft_evolution_readonly(
 /// Remove an NFT evolution record from storage.
 pub fn remove_nft_evolution(env: &Env, depositor: &Address, deposit_id: u32) {
     let key = crate::types::VaultKey::NFTEvolution(depositor.clone(), deposit_id);
+    env.storage().persistent().remove(&key);
+}
+
+// ----------------------------------------------------------------
+//  Staker pool helpers (Issue #111)
+//
+//  30 % of each cancel_deposit penalty goes to fee_recipient.
+//  70 % accumulates here, per token, until claimed via claim_staker_pool.
+// ----------------------------------------------------------------
+
+/// Basis-points numerator for the fee-recipient slice (30 %).
+pub const STAKER_FEE_BPS: i128 = 3_000;
+/// Basis-points numerator for the staker-pool slice (70 %).
+pub const STAKER_POOL_BPS: i128 = 7_000;
+
+/// Return the current staker-pool balance for `token`, defaulting to 0.
+pub fn get_staker_pool_balance(env: &Env, token: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&VaultKey::StakerPool(token.clone()))
+        .unwrap_or(0_i128)
+}
+
+/// Overwrite the staker-pool balance for `token`.
+pub fn set_staker_pool_balance(env: &Env, token: &Address, balance: i128) {
+    let key = VaultKey::StakerPool(token.clone());
+    env.storage().persistent().set(&key, &balance);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Add `amount` to the staker-pool balance for `token`.
+/// Called during `cancel_deposit` to accumulate the 70 % staker slice.
+pub fn accumulate_staker_pool(env: &Env, token: &Address, amount: i128) {
+    let current = get_staker_pool_balance(env, token);
+    set_staker_pool_balance(env, token, current.saturating_add(amount));
+}
+
+/// Atomically drain the staker-pool balance for `token` to zero and return
+/// the amount that was held.  Returns 0 if the pool was empty.
+pub fn drain_staker_pool(env: &Env, token: &Address) -> i128 {
+    let balance = get_staker_pool_balance(env, token);
+    if balance > 0 {
+        let key = VaultKey::StakerPool(token.clone());
+        env.storage().persistent().remove(&key);
+    }
+    balance
+}
+
+
+// ----------------------------------------------------------------
+//  MEV Protection: Commit-Reveal Scheme
+// ----------------------------------------------------------------
+
+/// Store a commit hash for a (depositor, deposit_id) pair.
+/// The commit is stored with a TTL window of MEV_COMMIT_WINDOW_SECS (30 minutes)
+/// to allow time for the reveal phase.
+pub fn set_mev_commit(env: &Env, depositor: &Address, deposit_id: u32, commit: &Bytes) {
+    use crate::types::MEV_COMMIT_WINDOW_SECS;
+    
+    let key = VaultKey::MevCommit(depositor.clone(), deposit_id);
+    env.storage().persistent().set(&key, commit);
+    
+    // TTL for commit: 30 minutes (MEV reveal window)
+    // Convert seconds to ledgers (5 seconds per ledger)
+    let commit_ttl_ledgers = ((MEV_COMMIT_WINDOW_SECS + LEDGER_SECONDS - 1) / LEDGER_SECONDS) as u32;
+    let commit_ttl_threshold = commit_ttl_ledgers / 2;
+    
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, commit_ttl_threshold, commit_ttl_ledgers);
+}
+
+/// Retrieve a stored commit hash for a (depositor, deposit_id) pair.
+/// Returns None if no commit exists for this pair.
+pub fn get_mev_commit(env: &Env, depositor: &Address, deposit_id: u32) -> Option<Bytes> {
+    let key = VaultKey::MevCommit(depositor.clone(), deposit_id);
+    env.storage().persistent().get(&key)
+}
+
+/// Delete a commit hash after successful reveal.
+/// Prevents replay attacks and cleans up storage.
+pub fn remove_mev_commit(env: &Env, depositor: &Address, deposit_id: u32) {
+    let key = VaultKey::MevCommit(depositor.clone(), deposit_id);
     env.storage().persistent().remove(&key);
 }

@@ -319,6 +319,57 @@ soroban contract invoke \
   --depositor "$USER_ADDRESS"
 ```
 
+### get_deposits_page(offset, limit)
+
+Returns a flat page of `(depositor, deposit_id, VaultEntry)` tuples for timestamp-based, single-token deposits. This query reads the timestamp `Deposit(depositor, deposit_id)` storage key only, so it does **not** include ledger-based deposits (stored under `DepositByLedger`) or multi-token deposits (stored under `MultiDeposit`). These storage keys hold different entry types; use the matching query for each type: `get_vault`, `get_ledger_vault`, or `get_multi_vault`.
+
+```bash
+soroban contract invoke \
+  --id "$CONTRACT_ID" \
+  --source "$USER_SECRET" \
+  --network "$NETWORK" \
+  --rpc-url "$RPC_URL" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- get_deposits_page \
+  --offset 0 \
+  --limit 10
+```
+
+To enumerate active ledger deposits, page through `get_depositors`, call `get_deposit_ids` for each depositor, and query `get_ledger_vault` for each ID. The active ID list is shared across deposit types; an ID is a ledger deposit when `get_ledger_vault` returns an entry. The following SDK-neutral JavaScript pseudocode assumes `invokeRead(method, args)` calls the contract and returns decoded native values (`Option::None` as `null`):
+
+```javascript
+async function listLedgerDeposits(invokeRead) {
+  const pageSize = 50;
+  const ledgerDeposits = [];
+
+  for (let offset = 0; ; offset += pageSize) {
+    const page = await invokeRead("get_depositors", {
+      offset,
+      limit: pageSize,
+    });
+
+    for (const depositor of page.items) {
+      const depositIds = await invokeRead("get_deposit_ids", { depositor });
+      for (const depositId of depositIds) {
+        const entry = await invokeRead("get_ledger_vault", {
+          depositor,
+          deposit_id: depositId,
+        });
+        if (entry !== null) {
+          ledgerDeposits.push({ depositor, depositId, entry });
+        }
+      }
+    }
+
+    if (offset + pageSize >= page.total_count) break;
+  }
+
+  return ledgerDeposits;
+}
+```
+
+`get_depositors.total_count` counts active depositors, not deposits. This workaround lists currently active ledger entries only; it does not provide historical deposits. A future unified enumeration API could expose all deposit types under a common paginated interface.
+
 ### get_time()
 
 Returns the current ledger timestamp.

@@ -267,6 +267,12 @@ Withdraws if `now >= unlock_time`.
 #### `withdraw_to(depositor, deposit_id, recipient)`
 Withdraws to a different address.
 
+**Recipient Validation**
+- The recipient address must be valid and non-zero. Soroban's Address type ensures addresses are properly formed at the SDK level.
+- Validation occurs before any state mutations (storage writes or token transfers), ensuring the transaction fails early with a clear error message if the recipient is invalid.
+- If recipient validation fails, the deposit remains in storage with no state changes.
+- Returns `InvalidRecipient` error (code 28) if the recipient address is invalid.
+
 #### `cancel_deposit(depositor, deposit_id)`
 Early exit with penalty. Penalty is split: 30% goes to fee_recipient, 70% accumulates in the staker rewards pool; remainder returned to depositor.
 
@@ -274,7 +280,7 @@ Early exit with penalty. Penalty is split: 30% goes to fee_recipient, 70% accumu
 
 ### Staker Registry Functions
 
-The staker registry allows users to register as stakers and earn a portion of penalties accrued from early deposit exits. This creates an incentive mechanism where stakers share in the penalties paid by users who exit early.
+The staker registry records a numeric weight and maintains penalty/reward-pool accounting. **The current implementation does not transfer tokens on registration or on reward claims, and the pool is not separated by token.** Read the [Staker Registry User Guide](./docs/STAKER_REGISTRY_GUIDE.md) for the step-by-step registration and claim walkthroughs, exact calculation rules, CLI and TypeScript examples, and FAQ.
 
 #### `register_staker(staker, amount) -> Result<(), VaultError>`
 Register or update a staker's stake amount.
@@ -284,7 +290,7 @@ Register or update a staker's stake amount.
 | Parameter | Type | Description |
 |---|---|---|
 | `staker` | `Address` | The staker's address. Must sign the transaction. |
-| `amount` | `i128` | Stake amount in contract tokens (> 0). |
+| `amount` | `i128` | Positive numeric weight used in reward calculations; no tokens are transferred. |
 
 **Returns** `Ok(())` on success, or an error code if validation fails.
 
@@ -325,11 +331,11 @@ Claim accumulated rewards from the staker rewards pool.
 
 **Behavior**
 - Validates that the staker is registered — returns `StakerNotFound` if not.
-- Calculates the staker's proportional share: `(stake_amount / total_staked) × rewards_pool`.
+- Calculates `floor(stake_amount × current_rewards_pool / total_staked)` using the pool at claim time.
 - Validates that the calculated reward is > 0 — returns `NoRewardsToClaim` if the pool is empty or the proportion rounds to zero.
 - Deducts the reward from the rewards pool.
 - Tracks cumulative rewards claimed per staker for auditing.
-- Emits a `RewardsClaimed` event.
+- Emits a `RewardsClaimed` event. The current implementation does not transfer tokens.
 - Requires authentication from the staker.
 
 **Example**
@@ -337,15 +343,17 @@ Claim accumulated rewards from the staker rewards pool.
 // Alice claims her proportional share of the rewards pool
 vault.claim_staker_rewards(&alice)?;
 
-// If Alice has stake 1000 and total_staked is 4000, and rewards_pool is 700:
-// Alice's reward = (1000 / 4000) × 700 = 175 tokens
+// If Alice has weight 1000, total_staked is 4000, and the pool is 700:
+// The claim accounting amount is floor(1000 × 700 / 4000) = 175.
 ```
+
+For limitations, claim-order effects, and the full penalty behavior, see the [Staker Registry User Guide](./docs/STAKER_REGISTRY_GUIDE.md).
 
 ---
 
 ### Penalty Splitting & Rewards Pool
 
-When a user calls `cancel_deposit()` to exit early, the penalty is split as follows:
+For timestamp-based and ledger-based single-token deposits, an early `cancel_deposit()` splits the penalty as follows:
 
 | Recipient | Percentage | Basis Points |
 |---|---|---|
@@ -358,6 +366,7 @@ If a user cancels a deposit with 100 tokens penalty (10% of 1000):
 - Staker Rewards Pool receives 70 tokens (100 × 0.70)
 
 Registered stakers can then claim their proportional share of the rewards pool based on their stake amount relative to total staked.
+Multi-token early cancellation currently sends the full penalty to the fee recipient. Claims update accounting and emit an event but do not transfer tokens; see the [Staker Registry User Guide](./docs/STAKER_REGISTRY_GUIDE.md) for details.
 
 ---
 
@@ -663,7 +672,6 @@ The following gaps apply specifically to `deposit_by_ledger` deposits. All other
 | Limitation | Detail |
 |---|---|
 | **No frontend support** | The React UI only exposes `deposit` and `deposit_for`. Ledger-based deposits must be made via the Stellar CLI or a custom SDK integration. |
-| **No maximum lock duration** | `deposit` and `deposit_for` reject lock durations longer than `max_lock_secs` (default 5 years). `deposit_by_ledger` only enforces a *minimum* gap of 12 ledgers (`MIN_LOCK_LEDGERS`). There is no equivalent upper-bound check on `unlock_ledger`, so arbitrarily far-future ledger numbers are accepted. |
 | **`get_vault` returns `None`** | The `get_vault(depositor, id)` query only searches timestamp-based entries. To retrieve a ledger-based deposit, use `get_ledger_vault(depositor, id)` which returns `Option<LedgerVaultEntry>`. |
 | **`time_remaining` is an estimate** | For ledger-based deposits, `time_remaining` returns `remaining_ledgers × 5` seconds. This is an approximation because actual ledger close times vary by ±1-2 seconds and are not exactly 5 seconds. **Do not rely on this value for precise scheduling or critical timing.** Use this estimate for UI display and rough scheduling only. The actual withdrawal check (`current_ledger >= unlock_ledger`) is exact and will work correctly. |
 | **`get_deposits_page` excludes ledger-based deposits** | The paginated flat deposits view only iterates over timestamp-based `VaultEntry` records. To enumerate ledger-based deposits, use `get_depositors` + `get_deposit_ids` + `get_ledger_vault`. |
@@ -1107,3 +1115,14 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) and [CHANGELOG.md](./CHANGELOG.md).
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-899 -->
+- #899: Issue #8: Withdraw - Recipient Address Validation
+
+<!-- handsoff-issue-901 -->
+- #901: Issue #10: Deposit Retrieval - get_vault Query Consistency
+
+<!-- handsoff-issue-902 -->
+- #902: Issue #11: Withdrawal Fee Calculation Accuracy

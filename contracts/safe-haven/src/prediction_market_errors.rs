@@ -52,4 +52,7 @@ pub enum PredictionMarketError {
     // Generic errors
     InvalidArgument = 1029,
     InternalError = 1030,
+
+    /// `init_prediction_markets` was called on an already-initialized subsystem.
+    AlreadyInitialized = 1031,
 }

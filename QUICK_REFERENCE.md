@@ -95,8 +95,8 @@ staker_reward = (staker_stake / total_staked) * rewards_pool
 
 ### RewardsClaimed
 - Emitted when staker claims rewards
-- Topics: staker address
-- Data: claimed amount
+- Topics: event name, staker address (filterable by staker)
+- Data: claimed amount, ledger timestamp
 
 ## 🧪 Test Coverage
 

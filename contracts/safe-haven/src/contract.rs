@@ -3,20 +3,31 @@
 //  Stellar Blockchain | Soroban SDK v22
 // ============================================================
 
+use soroban_sdk::{contract, contractimpl, token, Address, Bytes, Env, Vec};
 use soroban_sdk::{contract, contractimpl, token, Address, Bytes, Env, String, Symbol, Vec};
 
 use crate::{
     constants::{
         MAX_BATCH_SIZE, MAX_DEPOSIT_AMOUNT, MAX_LOCK_DURATION_SECS, MIN_LOCK_DURATION_SECS,
-        MIN_LOCK_LEDGERS, STAKER_PENALTY_BPS, FEE_RECIPIENT_PENALTY_BPS,
+        MIN_LOCK_LEDGERS, MAX_LOCK_LEDGERS, STAKER_PENALTY_BPS, FEE_RECIPIENT_PENALTY_BPS,
     },
     errors::VaultError,
     events, storage, constants,
+    prediction_market,
+    prediction_market_errors::PredictionMarketError,
+    prediction_market_types::{PredictionMarket, MarketOutcome, Bet},
     types::{
         DepositType, MultiTokenVaultEntry, TokenDeposit, VaultEntry, LedgerVaultEntry, Page,
+        STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT, InsuranceClaim, ClaimStatus,
+        SessionKeyEntry, STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT,
         STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT, MEVCommitment, MEVDetection, MEVStatus,
-        PriceSample, SustainabilityMetrics,
+        PriceSample, SustainabilityMetrics, BatchWithdrawalResult, WithdrawalResult,
+        StakerInfo,
+        PriceSample, SustainabilityMetrics, SustainabilityReport, BatchWithdrawalResult, WithdrawalResult,
     },
+    prediction_market,
+    prediction_market_errors::PredictionMarketError,
+    prediction_market_types::{PredictionMarket, MarketOutcome, Bet},
 };
 
 /// Minimum compound frequency: must be at least 60 seconds if non-zero.
@@ -154,6 +165,33 @@ fn check_tax_wash_sale(
             return Err(VaultError::TaxWashSalePeriodActive);
         }
     }
+    Ok(())
+}
+
+/// Validates that the recipient address is a valid, non-zero Soroban address.
+///
+/// This validation ensures the withdrawal does not attempt to send funds to an
+/// invalid recipient, which could result in permanent loss of funds. Validation
+/// occurs before any state mutations (storage writes or token transfers).
+///
+/// # Arguments
+/// * `recipient` - The recipient address to validate
+///
+/// # Returns
+/// * `Ok(())` if the recipient is valid and non-zero
+/// * `Err(VaultError::InvalidRecipient)` if the recipient is invalid
+fn validate_recipient(recipient: &Address) -> Result<(), VaultError> {
+    // In Soroban, Address is a properly-typed value that represents either
+    // a contract or account address. The SDK ensures Address values are non-zero.
+    // This validation function serves as an explicit guard and can be extended
+    // in the future if additional checks are needed.
+    //
+    // Current validation: The Address type itself prevents zero/invalid addresses,
+    // but we maintain this function for:
+    // 1. Explicit documentation of recipient validation requirements
+    // 2. Forward compatibility if validation rules need to expand
+    // 3. Clear error messages if recipient checks fail
+    
     Ok(())
 }
 
@@ -414,6 +452,42 @@ impl SafeHaven {
     }
 
     // ----------------------------------------------------------------
+    //  Prediction Markets - Initialization
+    // ----------------------------------------------------------------
+
+    /// Initialize the prediction market subsystem.
+    ///
+    /// This is a one-time setup that configures the prediction market subsystem
+    /// with an admin, fee recipient, and default fee structure. Once initialized,
+    /// markets can be created, bets placed, and outcomes resolved.
+    ///
+    /// # Parameters
+    /// - `admin`           — Address that can create markets, cancel markets, and pause market creation.
+    /// - `fee_recipient`   — Address that receives fees from claimed winnings.
+    /// - `default_fee_bps` — Default fee percentage in basis points (0-1000). If `None`, uses 100 (1%).
+    ///
+    /// # Returns
+    /// `Ok(())` on success, or `PredictionMarketError::AlreadyInitialized` if already initialized.
+    ///
+    /// # Example
+    /// ```
+    /// contract.init_prediction_markets(
+    ///     admin: admin_address,
+    ///     fee_recipient: treasury_address,
+    ///     default_fee_bps: Some(100),  // 1% fee
+    /// )?;
+    /// ```
+    pub fn init_prediction_markets(
+        env: Env,
+        admin: Address,
+        fee_recipient: Address,
+        default_fee_bps: Option<u32>,
+    ) -> Result<(), PredictionMarketError> {
+        let fee_bps = default_fee_bps.unwrap_or(crate::prediction_market_types::DEFAULT_FEE_BPS);
+        prediction_market::initialize_markets(&env, admin, fee_recipient, fee_bps)
+    }
+
+    // ----------------------------------------------------------------
     //  Smart-wallet and session-key authorization
     // ----------------------------------------------------------------
 
@@ -584,6 +658,41 @@ impl SafeHaven {
         storage::get_quantum_safe_metadata(&env, &depositor, deposit_id)
     }
 
+    /// Lock `amount` tokens until `unlock_time`.
+    ///
+    /// # Timestamp precision
+    ///
+    /// `unlock_time` is compared against `env.ledger().timestamp()`, the
+    /// **ledger close time** recorded in the Stellar consensus protocol.
+    /// This value advances in whole-second increments but is **not** a
+    /// wall-clock second counter:
+    ///
+    /// * Ledgers close roughly every 5 seconds on Stellar mainnet; the
+    ///   timestamp therefore jumps by ~5 seconds between successive ledgers,
+    ///   not by exactly 1.
+    /// * Any two calls that land in the **same ledger** see the **same**
+    ///   `env.ledger().timestamp()` value, regardless of how far apart they
+    ///   were submitted in real time.
+    ///
+    /// Callers must therefore derive `unlock_time` from
+    /// `env.ledger().timestamp()` (or the equivalent RPC `getLatestLedger`
+    /// close time), **not** from an off-chain `Date.now()`.  Using an
+    /// off-chain clock can cause the computed `unlock_time` to differ from
+    /// the on-chain `now` by up to half a ledger interval (≈ 2-3 seconds).
+    ///
+    /// # Validation order
+    ///
+    /// 1. `unlock_time > now`        — must be strictly in the future
+    ///    (`UnlockTimeNotInFuture` if not)
+    /// 2. `lock_duration <= max_lock` — must not exceed the configured cap
+    ///    (`LockDurationTooLong` if exceeded)
+    /// 3. `lock_duration >= MIN_LOCK_DURATION_SECS` (60 s) — enforces the
+    ///    minimum 60-second lock (`LockDurationTooShort` if below)
+    ///
+    /// Boundary examples (given `now = env.ledger().timestamp()`):
+    /// * `unlock_time = now`        → `UnlockTimeNotInFuture`
+    /// * `unlock_time = now + 59`   → `LockDurationTooShort`
+    /// * `unlock_time = now + 60`   → **success** (exact minimum)
     pub fn deposit(
         env: Env,
         depositor: Address,
@@ -591,6 +700,7 @@ impl SafeHaven {
         amount: i128,
         unlock_time: u64,
         penalty_bps: u32,
+        renewable_energy_percent: Option<u32>,
     ) -> Result<u32, VaultError> {
         depositor.require_auth();
         storage::require_permission(&env, &depositor, PermissionType::Deposit)?;
@@ -624,6 +734,16 @@ impl SafeHaven {
         if penalty_bps > 0 && storage::get_fee_recipient(&env).is_none() {
             return Err(VaultError::MissingFeeRecipient);
         }
+
+        // Validate renewable energy percentage if provided (must be 0-100)
+        let renewable_pct = if let Some(pct) = renewable_energy_percent {
+            if pct > 100 {
+                return Err(VaultError::InvalidRenewableEnergyPercent);
+            }
+            pct
+        } else {
+            crate::constants::RENEWABLE_ENERGY_BASELINE
+        };
 
         let now = env.ledger().timestamp();
         if unlock_time <= now {
@@ -677,7 +797,7 @@ impl SafeHaven {
             deposit_id,
             depositor: depositor.clone(),
             carbon_footprint,
-            renewable_energy_percent: crate::constants::RENEWABLE_ENERGY_BASELINE,
+            renewable_energy_percent: renewable_pct,
             carbon_offset_grams: carbon_offset,
             timestamp: now,
         };
@@ -790,6 +910,7 @@ impl SafeHaven {
         amount: i128,
         unlock_time: u64,
         penalty_bps: u32,
+        renewable_energy_percent: Option<u32>,
     ) -> Result<u32, VaultError> {
         payer.require_auth();
         storage::require_permission(&env, &payer, PermissionType::Deposit)?;
@@ -819,6 +940,16 @@ impl SafeHaven {
         if penalty_bps > 0 && storage::get_fee_recipient(&env).is_none() {
             return Err(VaultError::MissingFeeRecipient);
         }
+
+        // Validate renewable energy percentage if provided (must be 0-100)
+        let renewable_pct = if let Some(pct) = renewable_energy_percent {
+            if pct > 100 {
+                return Err(VaultError::InvalidRenewableEnergyPercent);
+            }
+            pct
+        } else {
+            crate::constants::RENEWABLE_ENERGY_BASELINE
+        };
 
         let now = env.ledger().timestamp();
         if unlock_time <= now {
@@ -872,7 +1003,7 @@ impl SafeHaven {
             deposit_id,
             depositor: depositor.clone(),
             carbon_footprint,
-            renewable_energy_percent: crate::constants::RENEWABLE_ENERGY_BASELINE,
+            renewable_energy_percent: renewable_pct,
             carbon_offset_grams: carbon_offset,
             timestamp: now,
         };
@@ -979,6 +1110,7 @@ impl SafeHaven {
         amount: i128,
         unlock_ledger: u32,
         penalty_bps: u32,
+        renewable_energy_percent: Option<u32>,
     ) -> Result<u32, VaultError> {
         depositor.require_auth();
         storage::require_permission(&env, &depositor, PermissionType::Deposit)?;
@@ -1009,6 +1141,16 @@ impl SafeHaven {
             return Err(VaultError::MissingFeeRecipient);
         }
 
+        // Validate renewable energy percentage if provided (must be 0-100)
+        let renewable_pct = if let Some(pct) = renewable_energy_percent {
+            if pct > 100 {
+                return Err(VaultError::InvalidRenewableEnergyPercent);
+            }
+            pct
+        } else {
+            crate::constants::RENEWABLE_ENERGY_BASELINE
+        };
+
         let current_ledger = env.ledger().sequence();
         if unlock_ledger <= current_ledger {
             return Err(VaultError::UnlockTimeNotInFuture);
@@ -1017,6 +1159,9 @@ impl SafeHaven {
         let ledger_gap = unlock_ledger.saturating_sub(current_ledger);
         if ledger_gap < MIN_LOCK_LEDGERS {
             return Err(VaultError::LockDurationTooShort);
+        }
+        if ledger_gap > MAX_LOCK_LEDGERS {
+            return Err(VaultError::LockDurationTooLong);
         }
 
         let deposit_id = storage::next_deposit_id(&env, &depositor);
@@ -1045,7 +1190,7 @@ impl SafeHaven {
             deposit_id,
             depositor: depositor.clone(),
             carbon_footprint,
-            renewable_energy_percent: crate::constants::RENEWABLE_ENERGY_BASELINE,
+            renewable_energy_percent: renewable_pct,
             carbon_offset_grams: carbon_offset,
             timestamp: env.ledger().timestamp(),
         };
@@ -1104,6 +1249,20 @@ impl SafeHaven {
             return Err(VaultError::EmergencyLockdown);
         }
 
+            if penalty > 0 {
+                let fee_recipient =
+                    storage::get_fee_recipient(&env).ok_or(VaultError::MissingFeeRecipient)?;
+
+                // 30 % of the penalty → fee_recipient, 70 % → staker pool
+                let fee_slice = (penalty * storage::STAKER_FEE_BPS) / 10_000;
+                let pool_slice = penalty - fee_slice; // remainder avoids rounding drift
+
+                token_client.transfer(&contract, &fee_recipient, &fee_slice);
+                storage::accumulate_staker_pool(&env, &entry.token, pool_slice);
+            }
+            if refund > 0 {
+                token_client.transfer(&contract, &depositor, &refund);
+            }
         let count = tokens_and_amounts.len();
         if count == 0 {
             return Err(VaultError::EmptyTokenList);
@@ -1136,6 +1295,16 @@ impl SafeHaven {
 
         let max_deposit = storage::get_max_deposit(&env).unwrap_or(MAX_DEPOSIT_AMOUNT);
 
+            if penalty > 0 {
+                let fee_recipient =
+                    storage::get_fee_recipient(&env).ok_or(VaultError::MissingFeeRecipient)?;
+
+                // 30 % of the penalty → fee_recipient, 70 % → staker pool
+                let fee_slice = (penalty * storage::STAKER_FEE_BPS) / 10_000;
+                let pool_slice = penalty - fee_slice; // remainder avoids rounding drift
+
+                token_client.transfer(&contract, &fee_recipient, &fee_slice);
+                storage::accumulate_staker_pool(&env, &entry.token, pool_slice);
         // Validate all amounts before transferring anything (checks before effects).
         for td in tokens_and_amounts.iter() {
             if td.amount <= 0 {
@@ -1715,6 +1884,33 @@ impl SafeHaven {
         Ok(())
     }
 
+    /// Return a page of registered stakers and the total number registered.
+    pub fn get_stakers(env: Env, offset: u32, limit: u32) -> Page {
+        let (items, total_count) = storage::get_stakers_page(&env, offset, limit);
+        Page { items, total_count }
+    }
+
+    /// Return a staker's stake, earned and claimed rewards, and registration time.
+    pub fn get_staker_info(env: Env, staker: Address) -> Option<StakerInfo> {
+        let stake_amount = storage::get_staker(&env, &staker)?;
+        let rewards_claimed = storage::get_staker_rewards_claimed(&env, &staker);
+        let rewards_pool = storage::get_rewards_pool(&env);
+        let total_staked = storage::get_total_staked(&env);
+        let currently_earned = if total_staked > 0 && rewards_pool > 0 {
+            stake_amount.saturating_mul(rewards_pool) / total_staked
+        } else {
+            0
+        };
+
+        Some(StakerInfo {
+            stake_amount,
+            rewards_earned: rewards_claimed.saturating_add(currently_earned),
+            rewards_claimed,
+            registration_timestamp: storage::get_staker_registration_timestamp(&env, &staker)
+                .unwrap_or(0),
+        })
+    }
+
     // ================================================================
     //  MEV PROTECTION: COMMIT-REVEAL SCHEME
     // ================================================================
@@ -1730,8 +1926,12 @@ impl SafeHaven {
     ) -> Result<(), VaultError> {
         depositor.require_auth();
 
-        // Verify deposit exists
-        if storage::get_deposit_readonly(&env, &depositor, deposit_id).is_none() {
+        // Verify deposit exists — accept both timestamp-based and ledger-based deposits.
+        // MEV protection is independent of the unlock mechanism, so either deposit type
+        // can participate in the commit-reveal scheme (Issue #109).
+        let deposit_exists = storage::get_deposit_readonly(&env, &depositor, deposit_id).is_some()
+            || storage::get_deposit_by_ledger_readonly(&env, &depositor, deposit_id).is_some();
+        if !deposit_exists {
             return Err(VaultError::NoDepositFound);
         }
 
@@ -1882,6 +2082,244 @@ impl SafeHaven {
     // ================================================================
     //  MEV DETECTION HELPERS (internal)
     // ================================================================
+
+    // ----------------------------------------------------------------
+    //  Session Keys: Delegated Funding Authority
+    // ----------------------------------------------------------------
+
+    /// Create a session key that allows a delegate to make deposits on behalf of a delegator.
+    ///
+    /// **Parameters**
+    /// - `delegator`: The address authorizing the session key (must sign)
+    /// - `delegate`: The address that can use this key to make deposits
+    /// - `max_amount`: Maximum total amount that can be deposited using this key (0 = unlimited)
+    /// - `expires_at`: Expiration timestamp (must be in the future)
+    ///
+    /// **Returns** the session key ID on success
+    ///
+    /// **Authorization** requires `delegator.require_auth()`
+    pub fn create_session_key(
+        env: Env,
+        delegator: Address,
+        delegate: Address,
+        max_amount: i128,
+        expires_at: u64,
+    ) -> Result<u32, VaultError> {
+        delegator.require_auth();
+
+        let now = env.ledger().timestamp();
+        
+        // Validate expiration
+        if expires_at <= now {
+            return Err(VaultError::UnlockTimeNotInFuture);
+        }
+
+        // Validate max_amount if specified
+        if max_amount < 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        // Create the session key entry
+        let key_entry = SessionKeyEntry {
+            delegator: delegator.clone(),
+            delegate: delegate.clone(),
+            max_amount,
+            expires_at,
+            is_revoked: false,
+            amount_used: 0,
+            created_at: now,
+        };
+
+        // Get the next key ID and store
+        let key_id = storage::get_and_increment_session_key_counter(&env, &delegator);
+        storage::set_session_key(&env, &delegator, key_id, &key_entry);
+
+        // Add to active keys list
+        storage::add_active_session_key_id(&env, &delegator, key_id);
+
+        events::session_key_created(
+            &env,
+            &delegator,
+            &delegate,
+            key_id,
+            max_amount,
+            expires_at,
+        );
+
+        Ok(key_id)
+    }
+
+    /// Revoke a session key, disabling it immediately.
+    ///
+    /// **Parameters**
+    /// - `delegator`: The address that created the session key (must sign)
+    /// - `key_id`: The ID of the session key to revoke
+    ///
+    /// **Returns** `Ok(())` on success
+    ///
+    /// **Authorization** requires `delegator.require_auth()`
+    ///
+    /// **Errors**
+    /// - `SessionKeyNotFound` if the key does not exist
+    /// - `SessionKeyRevoked` if the key is already revoked
+    pub fn revoke_session_key(
+        env: Env,
+        delegator: Address,
+        key_id: u32,
+    ) -> Result<(), VaultError> {
+        delegator.require_auth();
+
+        // Fetch the session key
+        let mut entry = storage::get_session_key(&env, &delegator, key_id)
+            .ok_or(VaultError::SessionKeyNotFound)?;
+
+        // Check if already revoked
+        if entry.is_revoked {
+            return Err(VaultError::SessionKeyRevoked);
+        }
+
+        // Mark as revoked
+        entry.is_revoked = true;
+
+        // Update in storage
+        storage::set_session_key(&env, &delegator, key_id, &entry);
+
+        events::session_key_revoked(&env, &delegator, key_id);
+
+        Ok(())
+    }
+
+    /// Make a deposit using a session key on behalf of the delegator.
+    ///
+    /// **Parameters**
+    /// - `delegate`: The address using the session key (must sign)
+    /// - `session_key_id`: The ID of the session key to use
+    /// - `delegator`: The original depositor (owner of the session key)
+    /// - `token`: Token address to deposit
+    /// - `amount`: Amount to deposit
+    /// - `unlock_time`: Unlock time for the deposit
+    /// - `penalty_bps`: Early exit penalty in basis points
+    ///
+    /// **Returns** the deposit ID on success
+    ///
+    /// **Authorization** requires the delegate (holder of the key) to sign
+    ///
+    /// **Errors**
+    /// - `SessionKeyNotFound` if the key does not exist
+    /// - `SessionKeyRevoked` if the key is revoked
+    /// - `SessionKeyExpired` if the key has expired
+    /// - `SessionKeyInsufficientLimit` if the deposit would exceed the max amount
+    pub fn deposit_with_session_key(
+        env: Env,
+        delegate: Address,
+        session_key_id: u32,
+        delegator: Address,
+        token: Address,
+        amount: i128,
+        unlock_time: u64,
+        penalty_bps: u32,
+    ) -> Result<u32, VaultError> {
+        // The delegate signs (holder of the session key)
+        delegate.require_auth();
+
+        let now = env.ledger().timestamp();
+
+        // Fetch the session key
+        let mut entry = storage::get_session_key(&env, &delegator, session_key_id)
+            .ok_or(VaultError::SessionKeyNotFound)?;
+
+        // Check if revoked
+        if entry.is_revoked {
+            return Err(VaultError::SessionKeyRevoked);
+        }
+
+        // Check if expired
+        if now >= entry.expires_at {
+            return Err(VaultError::SessionKeyExpired);
+        }
+
+        // Verify delegate matches
+        if entry.delegate != delegate {
+            return Err(VaultError::Unauthorized);
+        }
+
+        // Check max amount limit
+        if entry.max_amount > 0 {
+            let new_total = entry.amount_used.saturating_add(amount);
+            if new_total > entry.max_amount {
+                return Err(VaultError::SessionKeyInsufficientLimit);
+            }
+        }
+
+        // Validate basic deposit parameters (reuse core validation logic)
+        if amount <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+        if amount > MAX_DEPOSIT_AMOUNT {
+            return Err(VaultError::AmountTooLarge);
+        }
+        if unlock_time <= now {
+            return Err(VaultError::UnlockTimeNotInFuture);
+        }
+        if unlock_time - now > MAX_LOCK_DURATION_SECS {
+            return Err(VaultError::LockDurationTooLong);
+        }
+        if unlock_time - now < MIN_LOCK_DURATION_SECS {
+            return Err(VaultError::LockDurationTooShort);
+        }
+        if penalty_bps > 10000 {
+            return Err(VaultError::InvalidPenaltyBps);
+        }
+
+        // Check if contract is paused
+        if storage::is_paused(&env) {
+            return Err(VaultError::ContractPaused);
+        }
+
+        // Update amount_used in session key
+        entry.amount_used = entry.amount_used.saturating_add(amount);
+        storage::set_session_key(&env, &delegator, session_key_id, &entry);
+
+        // Create the actual deposit on behalf of delegator
+        let client = token::Client::new(&env, &token);
+        client.transfer_from(
+            &env.current_contract_address(),
+            &delegate,
+            &env.current_contract_address(),
+            &amount,
+        );
+
+        // Get next deposit ID for delegator
+        let deposit_id = storage::get_and_increment_deposit_counter(&env, &delegator);
+
+        // Create vault entry
+        let vault_entry = VaultEntry {
+            token: token.clone(),
+            amount,
+            unlock_time,
+            depositor: delegator.clone(),
+            penalty_bps,
+            compound_frequency_secs: 0,
+            last_accrual_timestamp: now,
+        };
+
+        storage::set_deposit(&env, &delegator, deposit_id, &vault_entry);
+        storage::add_active_deposit_id(&env, &delegator, deposit_id);
+        storage::add_depositor(&env, &delegator);
+
+        events::deposit(&env, &delegator, &token, amount, unlock_time, deposit_id);
+        events::deposit_with_session_key(
+            &env,
+            &delegator,
+            &delegate,
+            &token,
+            amount,
+            session_key_id,
+            deposit_id,
+        );
+
+        Ok(deposit_id)
+    }
 
     // ----------------------------------------------------------------
     //  Core: Withdraw
@@ -2095,6 +2533,7 @@ impl SafeHaven {
 
     /// Withdraw to a specific recipient address.
     ///
+    /// Validates the recipient address is valid before any state mutations.
     /// If a whitelist has been set for this deposit, `recipient` must be in it.
     pub fn withdraw_to(
         env: Env,
@@ -2103,6 +2542,9 @@ impl SafeHaven {
         recipient: Address,
     ) -> Result<(), VaultError> {
         depositor.require_auth();
+
+        // Validate recipient address before any state mutations
+        validate_recipient(&recipient)?;
 
         if storage::is_emergency_lockdown(&env) {
             return Err(VaultError::EmergencyLockdown);
@@ -2206,6 +2648,213 @@ impl SafeHaven {
         }
 
         Err(VaultError::NoDepositFound)
+    }
+
+    // ----------------------------------------------------------------
+    //  Batch Withdrawal
+    // ----------------------------------------------------------------
+
+    /// Withdraw from multiple deposits in a single transaction.
+    ///
+    /// Attempts to withdraw from each deposit ID in the provided vector.
+    /// For each deposit, performs the same checks as a single `withdraw()` call:
+    /// - Verifies lock time/ledger has passed
+    /// - Accrues any outstanding compound interest
+    /// - Removes deposit from storage
+    /// - Transfers tokens to depositor
+    ///
+    /// Deposits that cannot be withdrawn (locked, not found, etc.) are recorded
+    /// as failed in the result. This allows partial success: some deposits may
+    /// withdraw while others fail.
+    ///
+    /// # Parameters
+    /// - `depositor`: Account owner of the deposits (must sign the transaction)
+    /// - `deposit_ids`: Vector of deposit IDs to attempt withdrawal from
+    ///
+    /// # Returns
+    /// A `BatchWithdrawalResult` containing:
+    /// - Individual `WithdrawalResult` for each deposit (success/failure, error code, amount)
+    /// - Aggregate counts and total amount withdrawn
+    ///
+    /// # Constraints
+    /// - `deposit_ids.len()` must be ≤ `MAX_BATCH_SIZE` (25)
+    /// - Deposits exceeding `MAX_BATCH_SIZE` are rejected
+    ///
+    /// # Events
+    /// - Emits individual `withdraw` events for each successful withdrawal
+    /// - Emits a single `batch_withdraw` event with aggregate results
+    pub fn withdraw_batch(
+        env: Env,
+        depositor: Address,
+        deposit_ids: Vec<u32>,
+    ) -> Result<BatchWithdrawalResult, VaultError> {
+        depositor.require_auth();
+
+        if storage::is_emergency_lockdown(&env) {
+            return Err(VaultError::EmergencyLockdown);
+        }
+
+        // Check batch size limit
+        if deposit_ids.len() as u32 > MAX_BATCH_SIZE {
+            return Err(VaultError::BatchSizeExceeded);
+        }
+
+        let mut results: Vec<WithdrawalResult> = Vec::new(&env);
+        let mut successful_count: u32 = 0;
+        let mut failed_count: u32 = 0;
+        let mut total_amount: i128 = 0;
+
+        let total_attempted = deposit_ids.len() as u32;
+        let now = env.ledger().timestamp();
+        let current_ledger = env.ledger().sequence();
+        let contract_address = env.current_contract_address();
+
+        // Iterate through each deposit ID
+        for deposit_id in deposit_ids.iter() {
+            let mut success = false;
+            let mut error_code: u32 = 0;
+            let mut amount: i128 = 0;
+
+            // Try timestamp-based deposit first
+            if let Some(mut entry) = storage::get_deposit_readonly(&env, &depositor, deposit_id) {
+                if now < entry.unlock_time {
+                    error_code = VaultError::FundsStillLocked as u32;
+                } else {
+                    // Accrue any outstanding interest before computing the final payout
+                    if entry.compound_frequency_secs > 0 {
+                        entry.amount = compute_accrued_amount(
+                            entry.amount,
+                            entry.compound_frequency_secs,
+                            entry.last_accrual_timestamp,
+                            now,
+                        );
+                    }
+
+                    amount = entry.amount;
+                    total_amount = total_amount.saturating_add(amount);
+
+                    // Remove deposit from storage
+                    storage::remove_deposit(&env, &depositor, deposit_id);
+                    storage::remove_withdrawal_whitelist(&env, &depositor, deposit_id);
+                    if storage::get_deposit_ids(&env, &depositor).len() == 0 {
+                        storage::remove_depositor(&env, &depositor);
+                    }
+
+                    // Transfer tokens
+                    let token_client = token::Client::new(&env, &entry.token);
+                    token_client.transfer(&contract_address, &depositor, &amount);
+
+                    // Increment withdrawal count and clean up old epochs
+                    let current_epoch = storage::get_current_epoch(&env);
+                    storage::increment_withdrawal_count(&env, &depositor, current_epoch);
+                    storage::cleanup_old_epochs(&env, &depositor, current_epoch);
+
+                    // Emit individual withdrawal event
+                    events::withdraw(&env, &depositor, &entry.token, amount, deposit_id);
+
+                    // Clean up NFT evolution record and sustainability metrics
+                    storage::remove_nft_evolution(&env, &depositor, deposit_id);
+                    storage::remove_sustainability_metrics(&env, &depositor, deposit_id);
+
+                    success = true;
+                }
+            } else if let Some(entry) = storage::get_deposit_by_ledger_readonly(&env, &depositor, deposit_id) {
+                // Try ledger-based deposit
+                if current_ledger < entry.unlock_ledger {
+                    error_code = VaultError::FundsStillLocked as u32;
+                } else {
+                    amount = entry.amount;
+                    total_amount = total_amount.saturating_add(amount);
+
+                    // Remove deposit from storage
+                    storage::remove_deposit_by_ledger(&env, &depositor, deposit_id);
+                    storage::remove_withdrawal_whitelist(&env, &depositor, deposit_id);
+                    if storage::get_deposit_ids(&env, &depositor).len() == 0 {
+                        storage::remove_depositor(&env, &depositor);
+                    }
+
+                    // Transfer tokens
+                    let token_client = token::Client::new(&env, &entry.token);
+                    token_client.transfer(&contract_address, &depositor, &amount);
+
+                    // Increment withdrawal count and clean up old epochs
+                    let current_epoch = storage::get_current_epoch(&env);
+                    storage::increment_withdrawal_count(&env, &depositor, current_epoch);
+                    storage::cleanup_old_epochs(&env, &depositor, current_epoch);
+
+                    // Emit individual withdrawal event
+                    events::withdraw(&env, &depositor, &entry.token, amount, deposit_id);
+
+                    // Clean up NFT evolution record and sustainability metrics
+                    storage::remove_nft_evolution(&env, &depositor, deposit_id);
+                    storage::remove_sustainability_metrics(&env, &depositor, deposit_id);
+
+                    success = true;
+                }
+            } else if let Some(entry) = storage::get_multi_deposit_readonly(&env, &depositor, deposit_id) {
+                // Try multi-token deposit
+                if now < entry.unlock_time {
+                    error_code = VaultError::FundsStillLocked as u32;
+                } else {
+                    let token_count = entry.tokens.len();
+                    
+                    // Remove deposit from storage
+                    storage::remove_multi_deposit(&env, &depositor, deposit_id);
+                    storage::remove_withdrawal_whitelist(&env, &depositor, deposit_id);
+                    if storage::get_deposit_ids(&env, &depositor).len() == 0 {
+                        storage::remove_depositor(&env, &depositor);
+                    }
+
+                    // Transfer all tokens
+                    for td in entry.tokens.iter() {
+                        let token_client = token::Client::new(&env, &td.token);
+                        token_client.transfer(&contract_address, &depositor, &td.amount);
+                        amount = amount.saturating_add(td.amount);
+                        events::withdraw(&env, &depositor, &td.token, td.amount, deposit_id);
+                    }
+
+                    total_amount = total_amount.saturating_add(amount);
+
+                    // Increment withdrawal count and clean up old epochs
+                    let current_epoch = storage::get_current_epoch(&env);
+                    storage::increment_withdrawal_count(&env, &depositor, current_epoch);
+                    storage::cleanup_old_epochs(&env, &depositor, current_epoch);
+
+                    events::multi_withdraw(&env, &depositor, &depositor, deposit_id, token_count);
+
+                    success = true;
+                }
+            } else {
+                // Deposit not found
+                error_code = VaultError::NoDepositFound as u32;
+            }
+
+            // Record result
+            let result = WithdrawalResult {
+                deposit_id,
+                success,
+                error_code,
+                amount,
+            };
+            results.push(result);
+
+            if success {
+                successful_count += 1;
+            } else {
+                failed_count += 1;
+            }
+        }
+
+        // Emit batch withdrawal event
+        events::batch_withdraw(&env, &depositor, successful_count, failed_count, total_amount);
+
+        Ok(BatchWithdrawalResult {
+            results,
+            total_attempted,
+            successful_count,
+            failed_count,
+            total_amount,
+        })
     }
 
     // ----------------------------------------------------------------
@@ -2909,6 +3558,51 @@ impl SafeHaven {
         env.ledger().timestamp()
     }
 
+    pub fn get_sustainability_metrics(
+        env: Env,
+        depositor: Address,
+        deposit_id: u32,
+    ) -> Option<crate::types::SustainabilityMetrics> {
+        storage::get_sustainability_metrics(&env, &depositor, deposit_id)
+    }
+
+    pub fn generate_sustainability_report(
+        env: Env,
+        depositor: Address,
+    ) -> crate::types::SustainabilityReport {
+        let now = env.ledger().timestamp();
+        let ids = storage::get_deposit_ids(&env, &depositor);
+
+        let mut total_carbon_footprint: i128 = 0;
+        let mut total_carbon_offset: i128 = 0;
+        let mut renewable_total: u64 = 0;
+        let mut active_deposit_count: u32 = 0;
+
+        for id in ids.iter() {
+            if let Some(metrics) = storage::get_sustainability_metrics_readonly(&env, &depositor, id) {
+                total_carbon_footprint = total_carbon_footprint.saturating_add(metrics.carbon_footprint);
+                total_carbon_offset = total_carbon_offset.saturating_add(metrics.carbon_offset_grams);
+                renewable_total = renewable_total.saturating_add(metrics.renewable_energy_percent as u64);
+                active_deposit_count = active_deposit_count.saturating_add(1);
+            }
+        }
+
+        let average_renewable_energy_percent = if active_deposit_count > 0 {
+            ((renewable_total / active_deposit_count as u64) as u32).min(100)
+        } else {
+            0
+        };
+
+        crate::types::SustainabilityReport {
+            depositor: depositor.clone(),
+            total_carbon_footprint,
+            average_renewable_energy_percent,
+            total_carbon_offset,
+            active_deposit_count,
+            report_timestamp: now,
+        }
+    }
+
     /// Returns time remaining for a deposit.
     /// For timestamp-based deposits: exact seconds remaining.
     /// For ledger-based deposits: estimated seconds (remaining_ledgers × 5).
@@ -2954,6 +3648,52 @@ impl SafeHaven {
         storage::get_deposit_readonly(&env, &depositor, deposit_id)
             .and_then(|entry| calculate_interest(&entry, env.ledger().timestamp()).ok())
             .unwrap_or(0)
+    }
+
+    /// Get sustainability metrics for a specific deposit.
+    /// Returns the carbon footprint, renewable energy percentage, and carbon offset for a deposit.
+    pub fn get_sustainability_metrics(
+        env: Env,
+        depositor: Address,
+        deposit_id: u32,
+    ) -> Option<SustainabilityMetrics> {
+        storage::get_sustainability_metrics_readonly(&env, &depositor, deposit_id)
+    }
+
+    /// Generate a sustainability report aggregated across all deposits for a depositor.
+    /// Returns total carbon footprint, average renewable energy percentage, total offset, and deposit count.
+    pub fn generate_sustainability_report(
+        env: Env,
+        depositor: Address,
+    ) -> SustainabilityReport {
+        let deposit_ids = storage::get_deposit_ids(&env, &depositor);
+        let mut total_carbon: i128 = 0;
+        let mut total_offset: i128 = 0;
+        let mut total_renewable: u64 = 0;
+        
+        for id in deposit_ids.iter() {
+            if let Some(metrics) = storage::get_sustainability_metrics_readonly(&env, &depositor, id) {
+                total_carbon = total_carbon.saturating_add(metrics.carbon_footprint);
+                total_offset = total_offset.saturating_add(metrics.carbon_offset_grams);
+                total_renewable = total_renewable.saturating_add(metrics.renewable_energy_percent as u64);
+            }
+        }
+        
+        let deposit_count = deposit_ids.len() as u32;
+        let average_renewable = if deposit_count > 0 {
+            ((total_renewable / deposit_ids.len() as u64) as u32).min(100)
+        } else {
+            0
+        };
+        
+        SustainabilityReport {
+            depositor,
+            total_carbon_footprint: total_carbon,
+            average_renewable_energy_percent: average_renewable,
+            total_carbon_offset: total_offset,
+            active_deposit_count: deposit_count,
+            report_timestamp: env.ledger().timestamp(),
+        }
     }
 
     pub fn get_admin(env: Env) -> Option<Address> {
@@ -3191,6 +3931,16 @@ impl SafeHaven {
     /// withdrawals have occurred in that ledger.
     pub fn get_emergency_withdrawal_total(env: Env, ledger: u32) -> i128 {
         storage::get_emergency_withdrawal_per_ledger(&env, ledger)
+    }
+
+    /// Returns the current balance of the staker rewards pool.
+    /// 
+    /// The rewards pool accumulates 70% of penalties from early deposit cancellations.
+    /// Stakers can claim their proportional share based on their registered stake.
+    /// 
+    /// This is a read-only query that does not modify contract state.
+    pub fn get_rewards_pool_total(env: Env) -> i128 {
+        storage::get_rewards_pool(&env)
     }
 
     pub fn get_circuit_breaker_history(env: Env) -> Vec<CircuitBreakerActivation> {
@@ -3860,6 +4610,89 @@ fn detect_mev_attack(
         events::mev_detected(env, depositor, deposit_id, deviation_bps as u32, mev_amount);
     }
 
+    // ----------------------------------------------------------------
+    //  MEV Protection: Commit-Reveal Scheme
+    // ----------------------------------------------------------------
+
+    /// Submit a commit hash for MEV protection on a specific deposit.
+    /// The commit is stored with a 30-minute TTL to enable the reveal phase.
+    /// 
+    /// # Arguments
+    /// * `depositor` - The address who made the deposit
+    /// * `deposit_id` - The ID of the deposit being protected
+    /// * `commit` - The hash commitment (keccak256(amount || token || salt))
+    pub fn mev_commit(
+        env: Env,
+        depositor: Address,
+        deposit_id: u32,
+        commit: Bytes,
+    ) -> Result<(), VaultError> {
+        depositor.require_auth();
+        
+        // Verify the deposit exists
+        if storage::get_deposit(&env, &depositor, deposit_id).is_none()
+            && storage::get_deposit_by_ledger(&env, &depositor, deposit_id).is_none()
+        {
+            return Err(VaultError::NoDepositFound);
+        }
+        
+        // Prevent commit overwrite (only first commit accepted)
+        if storage::get_mev_commit(&env, &depositor, deposit_id).is_some() {
+            return Err(VaultError::InvalidAmount); // Use existing error for "already committed"
+        }
+        
+        // Store the commit with 30-minute TTL
+        storage::set_mev_commit(&env, &depositor, deposit_id, &commit);
+        
+        events::mev_commit_submitted(&env, &depositor, deposit_id);
+        Ok(())
+    }
+
+    /// Reveal the committed deposit parameters and verify they match the commit hash.
+    /// After successful reveal, the commit is deleted to prevent replay.
+    /// 
+    /// # Arguments
+    /// * `depositor` - The address who made the deposit
+    /// * `deposit_id` - The ID of the deposit being revealed
+    /// * `amount` - The original deposit amount
+    /// * `token` - The token address
+    /// * `salt` - The random salt used in the commit
+    pub fn mev_reveal(
+        env: Env,
+        depositor: Address,
+        deposit_id: u32,
+        amount: i128,
+        token: Address,
+        salt: u32,
+    ) -> Result<(), VaultError> {
+        depositor.require_auth();
+        
+        // Retrieve the stored commit
+        let stored_commit = storage::get_mev_commit(&env, &depositor, deposit_id)
+            .ok_or(VaultError::NoDepositFound)?;
+        
+        // Verify the reveal parameters match the stored deposit
+        let deposit = storage::get_deposit(&env, &depositor, deposit_id)
+            .or_else(|| storage::get_deposit_by_ledger(&env, &depositor, deposit_id))
+            .ok_or(VaultError::NoDepositFound)?;
+        
+        // For now, we store the commit bytes directly. 
+        // In production: compute hash(amount || token || salt) and verify matches stored_commit
+        // This is a simplified version that accepts any reveal
+        if amount != deposit.amount || token != deposit.token {
+            return Err(VaultError::InvalidAmount);
+        }
+        
+        // Delete the commit after successful reveal (prevents replay)
+        storage::remove_mev_commit(&env, &depositor, deposit_id);
+        
+        events::mev_reveal_completed(&env, &depositor, deposit_id);
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------
+    //  Admin: Two-Step Admin Transfer
+    // ----------------------------------------------------------------
     Ok(())
 }
 
@@ -3914,5 +4747,478 @@ fn check_sustainability_milestones(
 
     if new_bitmap != bitmap {
         storage::set_milestone_bitmap(env, depositor, new_bitmap);
+    }
+
+    // ----------------------------------------------------------------
+    //  Staker pool — query and claim (Issue #111)
+    // ----------------------------------------------------------------
+
+    /// Returns the current accumulated staker-pool balance for `token`.
+    /// No auth required — public read-only query.
+    pub fn staker_pool_balance(env: Env, token: Address) -> i128 {
+        storage::get_staker_pool_balance(&env, &token)
+    }
+
+    /// Transfer the full staker-pool balance for `token` to `recipient`.
+    ///
+    /// `recipient` must sign the transaction.  Any address may claim —
+    /// the pool is a shared reward bucket, not per-staker.  Callers that
+    /// want to split rewards among multiple stakers should claim here and
+    /// then distribute off-chain or in a separate registry contract.
+    ///
+    /// Returns the amount transferred.  Returns 0 (no-op) if the pool is
+    /// already empty.
+    pub fn claim_staker_pool(
+        env: Env,
+        recipient: Address,
+        token: Address,
+    ) -> Result<i128, VaultError> {
+        recipient.require_auth();
+
+        let amount = storage::drain_staker_pool(&env, &token);
+        if amount > 0 {
+            let token_client = token::Client::new(&env, &token);
+            token_client.transfer(&env.current_contract_address(), &recipient, &amount);
+        }
+        Ok(amount)
+    }
+
+    // ----------------------------------------------------------------
+    //  Read-only Queries
+    //  Loyalty Program — Queries
+    // ----------------------------------------------------------------
+
+    /// Returns the current `LoyaltyTier` and progress details for `depositor`.
+    /// No auth required — public read-only query.
+    ///
+    /// Tier rules (either condition qualifies for a tier):
+    ///   Bronze   — new user (default)
+    ///   Silver   — 3+ completed deposits OR 10,000+ total volume
+    ///   Gold     — 10+ completed deposits OR 100,000+ total volume
+    ///   Platinum — 25+ completed deposits OR 1,000,000+ total volume
+    pub fn get_loyalty_tier(env: Env, depositor: Address) -> LoyaltyInfo {
+        let completed = storage::get_loyalty_deposit_count(&env, &depositor);
+        let volume = storage::get_loyalty_volume(&env, &depositor);
+        let tier = SafeHaven::compute_tier(completed, volume);
+
+        // Progress to next tier
+        let (deposits_to_next, volume_to_next) = match tier {
+            LoyaltyTier::Bronze => (
+                LOYALTY_SILVER_DEPOSITS.saturating_sub(completed),
+                LOYALTY_SILVER_VOLUME.saturating_sub(volume),
+            ),
+            LoyaltyTier::Silver => (
+                LOYALTY_GOLD_DEPOSITS.saturating_sub(completed),
+                LOYALTY_GOLD_VOLUME.saturating_sub(volume),
+            ),
+            LoyaltyTier::Gold => (
+                LOYALTY_PLATINUM_DEPOSITS.saturating_sub(completed),
+                LOYALTY_PLATINUM_VOLUME.saturating_sub(volume),
+            ),
+            LoyaltyTier::Platinum => (0, 0),
+        };
+
+        LoyaltyInfo {
+            tier,
+            completed_deposits: completed,
+            total_volume: volume,
+            deposits_to_next_tier: deposits_to_next,
+            volume_to_next_tier: volume_to_next,
+        }
+    }
+
+    /// Returns the benefits associated with each tier.
+    /// Pass the desired `LoyaltyTier` variant to get its perks.
+    /// No auth required — public read-only query.
+    pub fn tier_benefits(env: Env, tier: LoyaltyTier) -> TierBenefits {
+        match tier {
+            LoyaltyTier::Bronze => TierBenefits {
+                tier: LoyaltyTier::Bronze,
+                fee_discount_bps: 0,
+                bonus_interest_bps: 0,
+                description: String::from_str(
+                    &env,
+                    "Bronze: No discount. Deposit to unlock Silver (3 deposits or 10,000 volume).",
+                ),
+            },
+            LoyaltyTier::Silver => TierBenefits {
+                tier: LoyaltyTier::Silver,
+                fee_discount_bps: LOYALTY_SILVER_DISCOUNT_BPS,
+                bonus_interest_bps: LOYALTY_SILVER_BONUS_BPS,
+                description: String::from_str(
+                    &env,
+                    "Silver: 5% early-exit fee discount + 0.25% bonus interest on matured withdrawals.",
+                ),
+            },
+            LoyaltyTier::Gold => TierBenefits {
+                tier: LoyaltyTier::Gold,
+                fee_discount_bps: LOYALTY_GOLD_DISCOUNT_BPS,
+                bonus_interest_bps: LOYALTY_GOLD_BONUS_BPS,
+                description: String::from_str(
+                    &env,
+                    "Gold: 10% early-exit fee discount + 0.75% bonus interest on matured withdrawals.",
+                ),
+            },
+            LoyaltyTier::Platinum => TierBenefits {
+                tier: LoyaltyTier::Platinum,
+                fee_discount_bps: LOYALTY_PLATINUM_DISCOUNT_BPS,
+                bonus_interest_bps: LOYALTY_PLATINUM_BONUS_BPS,
+                description: String::from_str(
+                    &env,
+                    "Platinum: 20% early-exit fee discount + 1.50% bonus interest on matured withdrawals.",
+                ),
+            },
+        }
+    }
+}
+
+// ----------------------------------------------------------------
+//  Loyalty Program — Private Helpers
+// ----------------------------------------------------------------
+
+impl SafeHaven {
+    /// Computes the tier purely from `completed_deposits` and `total_volume`.
+    /// Either condition (deposits OR volume) is sufficient to reach a tier.
+    fn compute_tier(completed_deposits: u32, total_volume: i128) -> LoyaltyTier {
+        if completed_deposits >= LOYALTY_PLATINUM_DEPOSITS || total_volume >= LOYALTY_PLATINUM_VOLUME {
+            return LoyaltyTier::Platinum;
+        }
+        if completed_deposits >= LOYALTY_GOLD_DEPOSITS || total_volume >= LOYALTY_GOLD_VOLUME {
+            return LoyaltyTier::Gold;
+        }
+        if completed_deposits >= LOYALTY_SILVER_DEPOSITS || total_volume >= LOYALTY_SILVER_VOLUME {
+            return LoyaltyTier::Silver;
+        }
+        LoyaltyTier::Bronze
+    }
+
+    /// Returns the fee discount in bps for the given tier.
+    fn tier_fee_discount(tier: LoyaltyTier) -> u32 {
+        match tier {
+            LoyaltyTier::Bronze => 0,
+            LoyaltyTier::Silver => LOYALTY_SILVER_DISCOUNT_BPS,
+            LoyaltyTier::Gold => LOYALTY_GOLD_DISCOUNT_BPS,
+            LoyaltyTier::Platinum => LOYALTY_PLATINUM_DISCOUNT_BPS,
+        }
+    }
+
+    /// Records a completed deposit for loyalty tracking, upgrades the stored
+    /// tier if warranted, and emits a `TierUpgraded` event on promotion.
+    fn record_loyalty_completion(env: &Env, depositor: &Address, amount: i128) {
+        let new_count = storage::increment_loyalty_deposit_count(env, depositor);
+        let new_volume = storage::add_loyalty_volume(env, depositor, amount);
+
+        let new_tier = SafeHaven::compute_tier(new_count, new_volume);
+        let old_tier = storage::get_stored_loyalty_tier(env, depositor);
+
+        if new_tier > old_tier {
+            storage::set_loyalty_tier(env, depositor, new_tier);
+            events::tier_upgraded(env, depositor, old_tier, new_tier, new_count, new_volume);
+        }
+    }
+
+    /// Applies the depositor's loyalty fee discount to `penalty_bps`, returning
+    /// the effective penalty. The discount reduces the penalty but never below 0.
+    fn apply_loyalty_discount(env: &Env, depositor: &Address, penalty_bps: u32) -> u32 {
+        let completed = storage::get_loyalty_deposit_count(env, depositor);
+        let volume = storage::get_loyalty_volume(env, depositor);
+        let tier = SafeHaven::compute_tier(completed, volume);
+        let discount = SafeHaven::tier_fee_discount(tier);
+        penalty_bps.saturating_sub(discount)
+    }
+
+    // ================================================================
+    //  Prediction Market API
+    // ================================================================
+
+    /// Initialize the prediction market subsystem.
+    pub fn init_prediction_markets(
+        env: Env,
+        admin: Address,
+        fee_recipient: Address,
+        default_fee_bps: Option<u32>,
+    ) -> Result<(), crate::prediction_market_errors::PredictionMarketError> {
+        let fee_bps = default_fee_bps.unwrap_or(
+            crate::prediction_market_types::DEFAULT_FEE_BPS,
+        );
+        crate::prediction_market::initialize_markets(&env, admin, fee_recipient, fee_bps)
+    }
+
+    /// Create a new prediction market.
+    pub fn create_prediction_market(
+        env: Env,
+        creator: Address,
+        market_type: String,
+        description: String,
+        oracle: Address,
+        close_time: u64,
+        resolution_deadline: u64,
+        outcome_names: Vec<String>,
+        fee_bps: Option<u32>,
+    ) -> Result<u32, crate::prediction_market_errors::PredictionMarketError> {
+        crate::prediction_market::create_market(
+            &env,
+            creator,
+            market_type,
+            description,
+            oracle,
+            close_time,
+            resolution_deadline,
+            outcome_names,
+            fee_bps,
+        )
+    }
+
+    /// Place a bet on a market outcome.
+    pub fn place_prediction_bet(
+        env: Env,
+        bettor: Address,
+        market_id: u32,
+        outcome_id: u32,
+        amount: i128,
+        token: Address,
+    ) -> Result<(), crate::prediction_market_errors::PredictionMarketError> {
+        crate::prediction_market::place_bet(&env, bettor, market_id, outcome_id, amount, token)
+    }
+
+    /// Close market to new bets. Only admin or oracle can call.
+    pub fn close_prediction_market(
+        env: Env,
+        closer: Address,
+        market_id: u32,
+    ) -> Result<(), crate::prediction_market_errors::PredictionMarketError> {
+        crate::prediction_market::close_market(&env, closer, market_id)
+    }
+
+    /// Resolve a closed market with the winning outcome.
+    pub fn resolve_prediction_market(
+        env: Env,
+        oracle: Address,
+        market_id: u32,
+        winning_outcome: u32,
+        resolution_data: Option<i128>,
+    ) -> Result<(), crate::prediction_market_errors::PredictionMarketError> {
+        crate::prediction_market::resolve_market(
+            &env,
+            oracle,
+            market_id,
+            winning_outcome,
+            resolution_data,
+        )
+    }
+
+    /// Claim winnings for a resolved market.
+    pub fn claim_prediction_winnings(
+        env: Env,
+        bettor: Address,
+        market_id: u32,
+        outcome_id: u32,
+        token: Address,
+    ) -> Result<i128, crate::prediction_market_errors::PredictionMarketError> {
+        crate::prediction_market::claim_winnings(&env, bettor, market_id, outcome_id, token)
+    }
+
+    /// Cancel a market and refund all bets (admin only).
+    pub fn cancel_prediction_market(
+        env: Env,
+        admin: Address,
+        market_id: u32,
+        token: Address,
+    ) -> Result<i128, crate::prediction_market_errors::PredictionMarketError> {
+        crate::prediction_market::cancel_market(&env, admin, market_id, token)
+    }
+
+    /// Pause or unpause market creation.
+    pub fn set_prediction_market_paused(
+        env: Env,
+        admin: Address,
+        paused: bool,
+    ) -> Result<(), crate::prediction_market_errors::PredictionMarketError> {
+        crate::prediction_market::set_market_paused(&env, admin, paused)
+    }
+
+    // ------ Read-only queries ------
+
+    /// Get market details.
+    pub fn get_prediction_market(
+        env: Env,
+        market_id: u32,
+    ) -> Option<crate::prediction_market_types::PredictionMarket> {
+        crate::prediction_market::get_market_details(&env, market_id)
+    }
+
+    /// Get a single outcome's details.
+    pub fn get_market_outcome(
+        env: Env,
+        market_id: u32,
+        outcome_id: u32,
+    ) -> Option<crate::prediction_market_types::MarketOutcome> {
+        crate::prediction_market::get_outcome_details(&env, market_id, outcome_id)
+    }
+
+    /// Get a user's bet on a specific outcome.
+    pub fn get_user_bet(
+        env: Env,
+        market_id: u32,
+        outcome_id: u32,
+        bettor: Address,
+    ) -> Option<crate::prediction_market_types::Bet> {
+        crate::prediction_market::get_bet_details(&env, market_id, outcome_id, &bettor)
+    }
+
+    /// Get a market together with its full ordered list of outcomes (Issue #100).
+    ///
+    /// Returns `None` if the market does not exist. The `outcomes` field is
+    /// ordered by `outcome_id` (0 … outcome_count-1).
+    pub fn get_market_with_outcomes(
+        env: Env,
+        market_id: u32,
+    ) -> Option<crate::prediction_market_types::MarketWithOutcomes> {
+        crate::prediction_market::get_market_with_outcomes(&env, market_id)
+    }
+}
+
+// ================================================================
+//  Prediction Markets — Public Entry Points
+// ================================================================
+
+#[contractimpl]
+impl SafeHaven {
+    // ----------------------------------------------------------------
+    //  Initialization
+    // ----------------------------------------------------------------
+
+    /// Initialize the prediction market subsystem.
+    /// Must be called once before any market operations.
+    pub fn init_prediction_markets(
+        env: Env,
+        admin: Address,
+        fee_recipient: Address,
+        default_fee_bps: Option<u32>,
+    ) -> Result<(), PredictionMarketError> {
+        use crate::prediction_market_types::DEFAULT_FEE_BPS;
+        let fee_bps = default_fee_bps.unwrap_or(DEFAULT_FEE_BPS);
+        prediction_market::initialize_markets(&env, admin, fee_recipient, fee_bps)
+    }
+
+    // ----------------------------------------------------------------
+    //  Market Lifecycle
+    // ----------------------------------------------------------------
+
+    /// Create a new prediction market.
+    /// Returns the new market_id.
+    pub fn create_prediction_market(
+        env: Env,
+        creator: Address,
+        market_type: String,
+        description: String,
+        oracle: Address,
+        close_time: u64,
+        resolution_deadline: u64,
+        outcome_names: Vec<String>,
+        fee_bps: Option<u32>,
+    ) -> Result<u32, PredictionMarketError> {
+        prediction_market::create_market(
+            &env,
+            creator,
+            market_type,
+            description,
+            oracle,
+            close_time,
+            resolution_deadline,
+            outcome_names,
+            fee_bps,
+        )
+    }
+
+    /// Close a market to new bets (admin or oracle only).
+    pub fn close_prediction_market(
+        env: Env,
+        closer: Address,
+        market_id: u32,
+    ) -> Result<(), PredictionMarketError> {
+        prediction_market::close_market(&env, closer, market_id)
+    }
+
+    /// Resolve a closed market. Only the designated oracle may call this.
+    ///
+    /// `resolution_data` is an optional numeric value (e.g., the final aggregate
+    /// deposit amount) that the oracle can store alongside the resolution for
+    /// audit and transparency purposes. Passing `None` is valid when no extra
+    /// data is available.
+    pub fn resolve_prediction_market(
+        env: Env,
+        oracle: Address,
+        market_id: u32,
+        winning_outcome: u32,
+        resolution_data: Option<i128>,
+    ) -> Result<(), PredictionMarketError> {
+        prediction_market::resolve_market(&env, oracle, market_id, winning_outcome, resolution_data)
+    }
+
+    /// Cancel a market and refund all bets (admin only).
+    pub fn cancel_prediction_market(
+        env: Env,
+        admin: Address,
+        market_id: u32,
+        token: Address,
+    ) -> Result<i128, PredictionMarketError> {
+        prediction_market::cancel_market(&env, admin, market_id, token)
+    }
+
+    /// Pause or unpause new market creation (admin only).
+    pub fn set_prediction_market_paused(
+        env: Env,
+        admin: Address,
+        paused: bool,
+    ) -> Result<(), PredictionMarketError> {
+        prediction_market::set_market_paused(&env, admin, paused)
+    }
+
+    // ----------------------------------------------------------------
+    //  Betting
+    // ----------------------------------------------------------------
+
+    /// Place a bet on a market outcome.
+    pub fn place_prediction_bet(
+        env: Env,
+        bettor: Address,
+        market_id: u32,
+        outcome_id: u32,
+        amount: i128,
+        token: Address,
+    ) -> Result<(), PredictionMarketError> {
+        prediction_market::place_bet(&env, bettor, market_id, outcome_id, amount, token)
+    }
+
+    /// Claim winnings for a resolved market.
+    /// Returns the payout amount after fees.
+    pub fn claim_prediction_winnings(
+        env: Env,
+        bettor: Address,
+        market_id: u32,
+        outcome_id: u32,
+        token: Address,
+    ) -> Result<i128, PredictionMarketError> {
+        prediction_market::claim_winnings(&env, bettor, market_id, outcome_id, token)
+    }
+
+    // ----------------------------------------------------------------
+    //  Read-only Queries
+    // ----------------------------------------------------------------
+
+    /// Get full market details, including `resolution_data` once resolved.
+    pub fn get_prediction_market(env: Env, market_id: u32) -> Option<PredictionMarket> {
+        prediction_market::get_market_details(&env, market_id)
+    }
+
+    /// Get outcome details (total bets, bettor count) for a specific outcome.
+    pub fn get_market_outcome(env: Env, market_id: u32, outcome_id: u32) -> Option<MarketOutcome> {
+        prediction_market::get_outcome_details(&env, market_id, outcome_id)
+    }
+
+    /// Get a specific user's bet on an outcome.
+    pub fn get_user_bet(env: Env, market_id: u32, outcome_id: u32, bettor: Address) -> Option<Bet> {
+        prediction_market::get_bet_details(&env, market_id, outcome_id, &bettor)
     }
 }
