@@ -34,35 +34,38 @@ pub enum VaultError {
     /// Price sampling too frequent: must wait >= 1 hour between samples
     SamplingTooFrequent = 21,
     /// Session key not found
-    SessionKeyNotFound = 20,
+    SessionKeyNotFound = 22,
     /// Session key has been revoked
-    SessionKeyRevoked = 21,
+    SessionKeyRevoked = 23,
     /// Session key has expired
-    SessionKeyExpired = 22,
+    SessionKeyExpired = 24,
     /// Session key exceeds maximum deposit amount
-    SessionKeyInsufficientLimit = 23,
+    SessionKeyInsufficientLimit = 25,
     /// Emergency withdrawal would exceed the per-ledger hard cap.
-    EmergencyWithdrawalLimitExceeded = 20,
+    EmergencyWithdrawalLimitExceeded = 26,
     /// Sponsorship fund not initialized
-    SponsorshipNotInitialized = 20,
+    SponsorshipNotInitialized = 27,
     /// User not eligible for sponsorship
-    NotEligibleForSponsorship = 21,
+    NotEligibleForSponsorship = 28,
     /// Sponsorship fund insufficient
-    InsufficientSponsorshipFund = 22,
+    InsufficientSponsorshipFund = 29,
     /// User exceeded daily sponsorship limit
-    SponsorshipDailyLimitExceeded = 23,
+    SponsorshipDailyLimitExceeded = 30,
     /// User transaction cooldown still active
-    SponsorshipCooldownActive = 24,
+    SponsorshipCooldownActive = 31,
     /// Potential sybil attack detected
-    PotentialSybilAttack = 25,
+    PotentialSybilAttack = 32,
     /// Sponsorship configuration error
-    InvalidSponsorshipConfig = 26,
+    InvalidSponsorshipConfig = 33,
     /// Batch size exceeds MAX_BATCH_SIZE
-    BatchSizeExceeded = 27,
+    BatchSizeExceeded = 34,
     /// Renewable energy percentage must be 0-100
-    InvalidRenewableEnergyPercent = 28,
+    InvalidRenewableEnergyPercent = 35,
     /// Recipient address is invalid (zero address)
-    InvalidRecipient = 29,
+    InvalidRecipient = 36,
+    /// Carbon footprint arithmetic would overflow i128 (issue #77).
+    /// Returned by the checked carbon calculation helpers.
+    CarbonOverflow = 37,
     /// Contract has not been initialized yet (issue #16).
-    NotInitialized = 30,
+    NotInitialized = 38,
 }

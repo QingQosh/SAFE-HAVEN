@@ -23,6 +23,16 @@ The session key authorization is scoped to one wallet and expires according to l
 
 ## Integration checklist
 
+For a comprehensive integration checklist, see the [Smart Wallet Integration Checklist](./SMART_WALLET_INTEGRATION_CHECKLIST.md). It includes:
+
+- Authorization verification points
+- Session key best practices and expiry management
+- Revocation procedures
+- Security audit checklist
+- Pre-deployment verification
+- Post-deployment operations
+
+**Quick checklist**:
 - Keep the smart wallet address as the `depositor`; do not substitute a relayer or signer address.
 - Ensure the wallet authorizes both the vault invocation and any token transfer it originates.
 - Use `deposit_for` for third-party funding and verify the payer has sufficient balance.

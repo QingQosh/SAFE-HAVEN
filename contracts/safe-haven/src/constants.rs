@@ -26,7 +26,23 @@ pub const MIN_LOCK_LEDGERS: u32 = (MIN_LOCK_DURATION_SECS / LEDGER_SECONDS) as u
 pub const EPOCH_SIZE_LEDGERS: u32 = 1_440;
 pub const WITHDRAWAL_LIMIT_PER_EPOCH: i128 = 50_000_000;
 pub const RENEWABLE_ENERGY_BASELINE: u32 = 50;
+/// Carbon baseline: grams CO2e per token base unit per second.
+///
+/// A deposit of `amount` base units locked for `duration` seconds emits
+/// `amount * duration * CARBON_BASELINE_PER_UNIT_SECOND` grams of CO2e
+/// (before any renewable-energy offset is applied).
 pub const CARBON_BASELINE_PER_UNIT_SECOND: i128 = 1;
+
+/// Theoretical maximum carbon footprint in grams CO2e.
+///
+/// Computed as `MAX_DEPOSIT_AMOUNT * MAX_LOCK_DURATION_SECS * CARBON_BASELINE_PER_UNIT_SECOND`
+/// = 10^15 * 157_788_000 * 1 ≈ 1.57788 × 10^23 grams CO2e.
+///
+/// This is far below `i128::MAX` (~1.7 × 10^38), so carbon arithmetic cannot
+/// overflow for any valid deposit/lock combination.
+pub const MAX_CARBON_FOOTPRINT: i128 =
+    MAX_DEPOSIT_AMOUNT * (MAX_LOCK_DURATION_SECS as i128) * CARBON_BASELINE_PER_UNIT_SECOND;
+
 /// Maximum number of ledgers allowed for a ledger-based deposit, equivalent to
 /// `MAX_LOCK_DURATION_SECS` converted at the nominal 5-second ledger rate.
 ///

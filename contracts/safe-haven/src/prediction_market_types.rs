@@ -73,6 +73,8 @@ pub struct PredictionMarket {
     pub description: soroban_sdk::String,
     /// Address of the oracle that will resolve this market
     pub oracle: Address,
+    /// Address of the market creator (authorized to close the market)
+    pub creator: Address,
     /// Unix timestamp when betting closes
     pub close_time: u64,
     /// Unix timestamp when market resolution must complete

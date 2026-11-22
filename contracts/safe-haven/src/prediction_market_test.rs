@@ -226,6 +226,7 @@ mod prediction_market_tests {
     /// Creating a 2-outcome market stores both names, sets outcome_count = 2,
     /// and each outcome is indexed by outcome_id 0 and 1.
     #[test]
+    #[test]
     fn test_two_outcome_market_outcome_count() {
         let (env, vault, admin, oracle, _fee) = setup_pm();
         let names = outcome_vec(&env, &["Yes (>1M)", "No (<=1M)"]);
@@ -241,6 +242,7 @@ mod prediction_market_tests {
     }
 
     /// Outcome 0 and 1 are retrievable individually with the correct names.
+    #[test]
     #[test]
     fn test_two_outcome_market_indexing() {
         let (env, vault, admin, oracle, _fee) = setup_pm();
@@ -260,6 +262,8 @@ mod prediction_market_tests {
 
         assert_eq!(outcome1.outcome_id, 1);
         assert_eq!(outcome1.name, String::from_str(&env, "No (<=1M)"));
+    }
+    #[test]
     fn test_init_prediction_markets_first_init_succeeds() {
         // ✅ AC #1: First init succeeds
         let (env, vault, admin, fee_recipient, _alice) = setup();
@@ -299,6 +303,7 @@ mod prediction_market_tests {
         vault.init_prediction_markets(&admin, &fee_recipient, &Some(100))
             .unwrap();
 
+    #[test]
     #[test]
     fn test_place_bet_valid() {
         let (env, contract, bettor, token, market_id, _) = betting_fixture();
@@ -391,6 +396,7 @@ mod prediction_market_tests {
 
     /// `get_market_with_outcomes` returns both the market and outcomes in order.
     #[test]
+    #[test]
     fn test_two_outcome_get_market_with_outcomes() {
         let (env, vault, admin, oracle, _fee) = setup_pm();
         let names = outcome_vec(&env, &["Yes (>1M)", "No (<=1M)"]);
@@ -420,6 +426,7 @@ mod prediction_market_tests {
 
     /// Outcome index 2 does not exist on a 2-outcome market (returns None).
     #[test]
+    #[test]
     fn test_two_outcome_invalid_index_returns_none() {
         let (env, vault, admin, oracle, _fee) = setup_pm();
         let names = outcome_vec(&env, &["Yes", "No"]);
@@ -436,6 +443,7 @@ mod prediction_market_tests {
 
     /// Creating a 3-outcome market stores three names and sets outcome_count = 3.
     #[test]
+    #[test]
     fn test_three_outcome_market_outcome_count() {
         let (env, vault, admin, oracle, _fee) = setup_pm();
         let names = outcome_vec(&env, &["High (>1M)", "Medium (500K-1M)", "Low (<500K)"]);
@@ -450,6 +458,7 @@ mod prediction_market_tests {
     }
 
     /// All three outcomes are individually retrievable and in order.
+    #[test]
     #[test]
     fn test_three_outcome_market_order_preserved() {
         let (env, vault, admin, oracle, _fee) = setup_pm();
@@ -480,6 +489,7 @@ mod prediction_market_tests {
 
     /// `get_market_with_outcomes` returns market + all 3 outcomes in order.
     #[test]
+    #[test]
     fn test_three_outcome_get_market_with_outcomes() {
         let (env, vault, admin, oracle, _fee) = setup_pm();
         let expected = ["High (>1M)", "Medium (500K-1M)", "Low (<500K)"];
@@ -502,6 +512,8 @@ mod prediction_market_tests {
             assert_eq!(o.outcome_id, idx as u32);
             assert_eq!(o.name, String::from_str(&env, expected_name));
         }
+    }
+    #[test]
     fn test_place_bet_invalid_amount_too_large() {
         let (env, contract, bettor, token, market_id, _) = betting_fixture();
         env.as_contract(&contract, || {
@@ -664,6 +676,7 @@ mod prediction_market_tests {
     }
 
     #[test]
+    #[test]
     fn test_place_bet_duplicate_outcome() {
         let (env, bettor, token, _fee_recipient, market_id) = setup_market_with_bettor();
 
@@ -677,6 +690,7 @@ mod prediction_market_tests {
         let other = prediction_market::get_bet_details(&env, market_id, 1, &bettor).unwrap();
         assert_eq!(other.amount, 50);
     }
+    #[test]
     fn test_init_prediction_markets_custom_fee_bps() {
         // Test initialization with custom fee_bps (200 = 2%)
         let (env, vault, admin, fee_recipient, _alice) = setup();
@@ -727,6 +741,7 @@ mod prediction_market_tests {
 
     /// Outcome index 3 does not exist on a 3-outcome market.
     #[test]
+    #[test]
     fn test_three_outcome_invalid_index_returns_none() {
         let (env, vault, admin, oracle, _fee) = setup_pm();
         let names = outcome_vec(&env, &["A", "B", "C"]);
@@ -740,6 +755,7 @@ mod prediction_market_tests {
     // ================================================================
     //  4-Outcome Market Tests
     // ================================================================
+    #[test]
     fn test_init_prediction_markets_zero_fee_bps() {
         // Test initialization with zero fee_bps
         let (env, vault, admin, fee_recipient, _alice) = setup();
@@ -756,6 +772,7 @@ mod prediction_market_tests {
     // ================================================================
 
     #[test]
+    #[test]
     fn test_create_market_valid() {
         // Test successful market creation with valid parameters
         // Expected: market_id = 1, status = Open
@@ -771,6 +788,7 @@ mod prediction_market_tests {
 
     /// Creating a 4-outcome market stores four names and sets outcome_count = 4.
     #[test]
+    #[test]
     fn test_four_outcome_market_outcome_count() {
         let (env, vault, admin, oracle, _fee) = setup_pm();
         let names = outcome_vec(
@@ -785,6 +803,8 @@ mod prediction_market_tests {
             .expect("market not found");
 
         assert_eq!(market.outcome_count, 4);
+    }
+    #[test]
     fn test_create_market_insufficient_close_duration() {
         // Test market creation with close_time too soon (< MIN_MARKET_DURATION_SECS)
         // Expected: InvalidResolutionTime error
@@ -814,6 +834,7 @@ mod prediction_market_tests {
 
     /// All four outcomes are individually retrievable by outcome_id.
     #[test]
+    #[test]
     fn test_four_outcome_market_indexing_by_outcome_id() {
         let (env, vault, admin, oracle, _fee) = setup_pm();
         let expected = ["Tier A (>2M)", "Tier B (1M-2M)", "Tier C (500K-1M)", "Tier D (<500K)"];
@@ -832,6 +853,7 @@ mod prediction_market_tests {
     }
 
     /// `get_market_with_outcomes` returns market + all 4 outcomes in order.
+    #[test]
     #[test]
     fn test_four_outcome_get_market_with_outcomes() {
         let (env, vault, admin, oracle, _fee) = setup_pm();
@@ -1037,6 +1059,7 @@ mod prediction_market_tests {
     /// Market outcome_count equals the length of the outcomes Vec returned
     /// by get_market_with_outcomes for all supported sizes.
     #[test]
+    #[test]
     fn test_outcome_count_matches_vec_length_for_all_sizes() {
         let (env, vault, admin, oracle, _fee) = setup_pm();
 
@@ -1066,6 +1089,8 @@ mod prediction_market_tests {
                 expected_count
             );
         }
+    }
+    #[test]
     fn test_create_market_insufficient_resolution_time() {
         // Test market creation with resolution window < min_resolution_time_secs
         // Expected: InvalidResolutionTime error
@@ -1460,6 +1485,183 @@ mod prediction_market_tests {
         );
     }
 
+    // ================================================================
+    //  Issue #86 — Close Prediction Market: Status Transition
+    // ================================================================
+
+    /// Creator can close their own market.
+    #[test]
+    fn test_close_market_by_creator_succeeds() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+
+        assert_eq!(
+            client.close_prediction_market(&alice, &market_id),
+            Ok(())
+        );
+        assert_eq!(
+            client.get_prediction_market(&market_id).unwrap().status,
+            MarketStatus::Closed
+        );
+    }
+
+    /// Admin can close a market they did not create.
+    #[test]
+    fn test_close_market_by_admin_succeeds() {
+        let (env, client, _token, admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+
+        assert_eq!(client.close_prediction_market(&admin, &market_id), Ok(()));
+        assert_eq!(
+            client.get_prediction_market(&market_id).unwrap().status,
+            MarketStatus::Closed
+        );
+    }
+
+    /// Designated oracle can close the market.
+    #[test]
+    fn test_close_market_by_oracle_succeeds() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+
+        assert_eq!(client.close_prediction_market(&oracle, &market_id), Ok(()));
+        assert_eq!(
+            client.get_prediction_market(&market_id).unwrap().status,
+            MarketStatus::Closed
+        );
+    }
+
+    /// An unrelated address cannot close the market.
+    #[test]
+    fn test_close_market_by_unauthorized_fails() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+        let stranger = Address::generate(&env);
+
+        assert_eq!(
+            client.close_prediction_market(&stranger, &market_id),
+            Err(Ok(PredictionMarketError::Unauthorized))
+        );
+        // Status must remain Open after a rejected close
+        assert_eq!(
+            client.get_prediction_market(&market_id).unwrap().status,
+            MarketStatus::Open
+        );
+    }
+
+    /// Closing a market that is not Open fails with InvalidMarketStatus.
+    #[test]
+    fn test_close_market_not_open_fails() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+
+        // First close succeeds
+        client.close_prediction_market(&oracle, &market_id).unwrap();
+
+        // Second close (idempotent attempt) fails — market is already Closed
+        assert_eq!(
+            client.close_prediction_market(&oracle, &market_id),
+            Err(Ok(PredictionMarketError::InvalidMarketStatus))
+        );
+        assert_eq!(
+            client.get_prediction_market(&market_id).unwrap().status,
+            MarketStatus::Closed
+        );
+    }
+
+    /// Closing a resolved market fails with InvalidMarketStatus.
+    #[test]
+    fn test_close_market_already_resolved_fails() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+        client.close_prediction_market(&oracle, &market_id).unwrap();
+        client
+            .resolve_prediction_market(&oracle, &market_id, &0, &None)
+            .unwrap();
+
+        assert_eq!(
+            client.close_prediction_market(&oracle, &market_id),
+            Err(Ok(PredictionMarketError::InvalidMarketStatus))
+        );
+    }
+
+    /// After close, no new bets are accepted.
+    #[test]
+    fn test_bets_rejected_after_close() {
+        let (env, client, token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+
+        client.close_prediction_market(&oracle, &market_id).unwrap();
+
+        let result = client.try_place_bet(&alice, &market_id, &0, &100, &token);
+        assert!(result.is_err(), "bets must be rejected after close");
+    }
+
+    /// Closed status persists across queries and time advancement.
+    #[test]
+    fn test_close_status_persists() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+
+        client.close_prediction_market(&oracle, &market_id).unwrap();
+
+        advance_time(&env, 500_000);
+
+        for _ in 0..3 {
+            assert_eq!(
+                client.get_prediction_market(&market_id).unwrap().status,
+                MarketStatus::Closed
+            );
+        }
+    }
+
+    // ================================================================
+    //  Issue #87 — Resolve Prediction Market: Oracle Submission
+    // ================================================================
+
+    /// Only the designated oracle may resolve; a stranger is rejected.
+    #[test]
+    fn test_resolve_by_non_oracle_fails() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+        client.close_prediction_market(&oracle, &market_id).unwrap();
+
+        let stranger = Address::generate(&env);
+        assert_eq!(
+            client.resolve_prediction_market(&stranger, &market_id, &0, &None),
+            Err(Ok(PredictionMarketError::UnauthorizedOracle))
+        );
+        // State unchanged
+        let market = client.get_prediction_market(&market_id).unwrap();
+        assert_eq!(market.status, MarketStatus::Closed);
+        assert_eq!(market.winning_outcome, None);
+    }
+
+    /// The market creator (non-oracle) cannot resolve.
+    #[test]
+    fn test_resolve_by_creator_non_oracle_fails() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+        client.close_prediction_market(&oracle, &market_id).unwrap();
+
+        assert_eq!(
+            client.resolve_prediction_market(&alice, &market_id, &0, &None),
+            Err(Ok(PredictionMarketError::UnauthorizedOracle))
+        );
+    }
+
+    /// Market must be Closed before resolution; Open market is rejected.
+    #[test]
+    fn test_resolve_open_market_fails() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+
+        assert_eq!(
+            client.resolve_prediction_market(&oracle, &market_id, &0, &None),
+            Err(Ok(PredictionMarketError::MarketNotClosedYet))
+        );
+    }
+
     // ----------------------------------------------------------------
     //  Issue #95: get_prediction_market query completeness
     // ----------------------------------------------------------------
@@ -1671,6 +1873,213 @@ mod prediction_market_tests {
             client.get_prediction_market(&market_id).unwrap().status,
             MarketStatus::Open
         );
+    }
+
+    /// Double submission is prevented.
+    #[test]
+    fn test_resolve_double_submission_fails() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+        client.close_prediction_market(&oracle, &market_id).unwrap();
+
+        client
+            .resolve_prediction_market(&oracle, &market_id, &0, &None)
+            .unwrap();
+
+        assert_eq!(
+            client.resolve_prediction_market(&oracle, &market_id, &1, &None),
+            Err(Ok(PredictionMarketError::OracleSubmissionExists))
+        );
+        // Original winning outcome preserved
+        assert_eq!(
+            client.get_prediction_market(&market_id).unwrap().winning_outcome,
+            Some(0)
+        );
+    }
+
+    /// Winning outcome is stored correctly after resolution.
+    #[test]
+    fn test_resolve_stores_winning_outcome() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+        client.close_prediction_market(&oracle, &market_id).unwrap();
+
+        client
+            .resolve_prediction_market(&oracle, &market_id, &1, &None)
+            .unwrap();
+
+        let market = client.get_prediction_market(&market_id).unwrap();
+        assert_eq!(market.status, MarketStatus::Resolved);
+        assert_eq!(market.winning_outcome, Some(1));
+    }
+
+    // ================================================================
+    //  Issue #88 — Resolve Market: Winning Outcome Validation
+    // ================================================================
+
+    /// A valid outcome (0) is accepted.
+    #[test]
+    fn test_resolve_valid_outcome_zero_accepted() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+        client.close_prediction_market(&oracle, &market_id).unwrap();
+
+        assert_eq!(
+            client.resolve_prediction_market(&oracle, &market_id, &0, &None),
+            Ok(())
+        );
+        assert_eq!(
+            client.get_prediction_market(&market_id).unwrap().winning_outcome,
+            Some(0)
+        );
+    }
+
+    /// A valid outcome (outcome_count - 1) is accepted.
+    #[test]
+    fn test_resolve_valid_outcome_last_accepted() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+        client.close_prediction_market(&oracle, &market_id).unwrap();
+
+        assert_eq!(
+            client.resolve_prediction_market(&oracle, &market_id, &1, &None),
+            Ok(())
+        );
+        assert_eq!(
+            client.get_prediction_market(&market_id).unwrap().winning_outcome,
+            Some(1)
+        );
+    }
+
+    /// outcome_count (out of range) is rejected with InvalidWinningOutcome.
+    #[test]
+    fn test_resolve_outcome_count_rejected() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+        client.close_prediction_market(&oracle, &market_id).unwrap();
+
+        let market = client.get_prediction_market(&market_id).unwrap();
+        let outcome_count = market.outcome_count;
+
+        assert_eq!(
+            client.resolve_prediction_market(&oracle, &market_id, &outcome_count, &None),
+            Err(Ok(PredictionMarketError::InvalidWinningOutcome))
+        );
+        // State unchanged
+        let after = client.get_prediction_market(&market_id).unwrap();
+        assert_eq!(after.status, MarketStatus::Closed);
+        assert_eq!(after.winning_outcome, None);
+    }
+
+    /// A large out-of-range outcome is rejected with InvalidWinningOutcome.
+    #[test]
+    fn test_resolve_large_outcome_rejected() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+        client.close_prediction_market(&oracle, &market_id).unwrap();
+
+        assert_eq!(
+            client.resolve_prediction_market(&oracle, &market_id, &u32::MAX, &None),
+            Err(Ok(PredictionMarketError::InvalidWinningOutcome))
+        );
+        assert_eq!(
+            client.get_prediction_market(&market_id).unwrap().winning_outcome,
+            None
+        );
+    }
+
+    // ================================================================
+    //  Issue #843 — Resolve Market: Resolution Deadline Enforcement
+    // ================================================================
+
+    /// Resolution before the deadline succeeds.
+    #[test]
+    fn test_resolve_before_deadline_succeeds() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+        client.close_prediction_market(&oracle, &market_id).unwrap();
+
+        let deadline = client.get_prediction_market(&market_id).unwrap().resolution_deadline;
+        // Move to 1 second before the deadline
+        let now = env.ledger().timestamp();
+        if deadline > now + 1 {
+            advance_time(&env, deadline - now - 1);
+        }
+
+        assert_eq!(
+            client.resolve_prediction_market(&oracle, &market_id, &0, &None),
+            Ok(())
+        );
+        assert_eq!(
+            client.get_prediction_market(&market_id).unwrap().status,
+            MarketStatus::Resolved
+        );
+    }
+
+    /// Resolution at exactly the deadline succeeds.
+    #[test]
+    fn test_resolve_at_deadline_succeeds() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+        client.close_prediction_market(&oracle, &market_id).unwrap();
+
+        let deadline = client.get_prediction_market(&market_id).unwrap().resolution_deadline;
+        let now = env.ledger().timestamp();
+        if deadline > now {
+            advance_time(&env, deadline - now);
+        }
+        assert_eq!(env.ledger().timestamp(), deadline);
+
+        assert_eq!(
+            client.resolve_prediction_market(&oracle, &market_id, &0, &None),
+            Ok(())
+        );
+        assert_eq!(
+            client.get_prediction_market(&market_id).unwrap().status,
+            MarketStatus::Resolved
+        );
+    }
+
+    /// Resolution one second after the deadline fails with ResolutionDeadlineExceeded.
+    #[test]
+    fn test_resolve_after_deadline_fails() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+        client.close_prediction_market(&oracle, &market_id).unwrap();
+
+        let deadline = client.get_prediction_market(&market_id).unwrap().resolution_deadline;
+        let now = env.ledger().timestamp();
+        if deadline >= now {
+            advance_time(&env, deadline - now + 1);
+        }
+        assert!(env.ledger().timestamp() > deadline);
+
+        assert_eq!(
+            client.resolve_prediction_market(&oracle, &market_id, &0, &None),
+            Err(Ok(PredictionMarketError::ResolutionDeadlineExceeded))
+        );
+        // State unchanged
+        let market = client.get_prediction_market(&market_id).unwrap();
+        assert_eq!(market.status, MarketStatus::Closed);
+        assert_eq!(market.winning_outcome, None);
+    }
+
+    /// The resolution deadline persists unchanged across queries and time.
+    #[test]
+    fn test_resolution_deadline_persists() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+
+        let deadline = client.get_prediction_market(&market_id).unwrap().resolution_deadline;
+
+        advance_time(&env, 1_000);
+
+        for _ in 0..3 {
+            assert_eq!(
+                client.get_prediction_market(&market_id).unwrap().resolution_deadline,
+                deadline
+            );
+        }
     }
 
     /// Full lifecycle: create → close → resolve with data → query confirms data.

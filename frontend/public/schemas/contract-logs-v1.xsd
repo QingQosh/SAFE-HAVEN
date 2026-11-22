@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           targetNamespace="urn:safe-haven:contract-logs:v1"
+           xmlns="urn:safe-haven:contract-logs:v1"
+           elementFormDefault="qualified">
+  <xs:element name="contractLogs">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="log" minOccurs="0" maxOccurs="unbounded">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="id" type="xs:string"/>
+              <xs:element name="operation" type="xs:string"/>
+              <xs:element name="status" type="xs:string"/>
+              <xs:element name="timestamp" type="xs:dateTime"/>
+              <xs:element name="txHash" type="xs:string"/>
+              <xs:element name="initiator" type="xs:string"/>
+              <xs:element name="parameters" type="xs:string"/>
+              <xs:element name="errorMessage" type="xs:string"/>
+              <xs:element name="details" type="xs:string"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>
