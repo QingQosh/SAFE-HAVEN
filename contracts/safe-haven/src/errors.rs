@@ -62,11 +62,6 @@ pub enum VaultError {
     /// Renewable energy percentage must be 0-100
     InvalidRenewableEnergyPercent = 35,
     /// Recipient address is invalid (zero address)
-    InvalidRecipient = 28,
-    /// Session key expiry must be in the future.
-    InvalidSessionKeyExpiry = 29,
-    /// Session key is not authorized for this wallet.
-    SessionKeyNotAuthorized = 30,
     InvalidRecipient = 36,
     /// Carbon footprint arithmetic would overflow i128 (issue #77).
     /// Returned by the checked carbon calculation helpers.

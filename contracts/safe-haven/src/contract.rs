@@ -536,7 +536,7 @@ impl SafeHaven {
         if expires_at <= env.ledger().timestamp() {
             return Err(VaultError::InvalidSessionKeyExpiry);
         }
-        storage::set_wallet_session_key(&env, &wallet, &session_key, expires_at);
+        storage::set_session_key(&env, &wallet, &session_key, expires_at);
         Ok(())
     }
 
@@ -546,7 +546,7 @@ impl SafeHaven {
         session_key: Address,
     ) -> Result<(), VaultError> {
         wallet.require_auth();
-        storage::remove_wallet_session_key(&env, &wallet, &session_key);
+        storage::remove_session_key(&env, &wallet, &session_key);
         Ok(())
     }
 
@@ -555,7 +555,7 @@ impl SafeHaven {
         wallet: Address,
         session_key: Address,
     ) -> bool {
-        storage::get_wallet_session_key_expiry(&env, &wallet, &session_key)
+        storage::get_session_key_expiry(&env, &wallet, &session_key)
             .map(|expires_at| expires_at > env.ledger().timestamp())
             .unwrap_or(false)
     }
@@ -575,7 +575,7 @@ impl SafeHaven {
         penalty_bps: u32,
     ) -> Result<u32, VaultError> {
         session_key.require_auth();
-        match storage::get_wallet_session_key_expiry(&env, &wallet, &session_key) {
+        match storage::get_session_key_expiry(&env, &wallet, &session_key) {
             Some(expires_at) if expires_at > env.ledger().timestamp() => {}
             Some(_) => return Err(VaultError::SessionKeyExpired),
             None => return Err(VaultError::SessionKeyNotAuthorized),
@@ -2153,7 +2153,7 @@ impl SafeHaven {
         Ok(key_id)
     }
 
-    /// Revoke an ID-based session key, disabling it immediately.
+    /// Revoke a session key, disabling it immediately.
     ///
     /// **Parameters**
     /// - `delegator`: The address that created the session key (must sign)
@@ -2166,7 +2166,7 @@ impl SafeHaven {
     /// **Errors**
     /// - `SessionKeyNotFound` if the key does not exist
     /// - `SessionKeyRevoked` if the key is already revoked
-    pub fn revoke_session_key_by_id(
+    pub fn revoke_session_key(
         env: Env,
         delegator: Address,
         key_id: u32,
@@ -2193,7 +2193,7 @@ impl SafeHaven {
         Ok(())
     }
 
-    /// Make a deposit using an ID-based session key on behalf of the delegator.
+    /// Make a deposit using a session key on behalf of the delegator.
     ///
     /// **Parameters**
     /// - `delegate`: The address using the session key (must sign)
@@ -2213,7 +2213,7 @@ impl SafeHaven {
     /// - `SessionKeyRevoked` if the key is revoked
     /// - `SessionKeyExpired` if the key has expired
     /// - `SessionKeyInsufficientLimit` if the deposit would exceed the max amount
-    pub fn deposit_with_session_key_by_id(
+    pub fn deposit_with_session_key(
         env: Env,
         delegate: Address,
         session_key_id: u32,
