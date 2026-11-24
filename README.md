@@ -1,74 +1,59 @@
-﻿# SAFE-HAVEN
+# Project
 
-[![Rust](https://img.shields.io/badge/Rust-1.81%2B-orange?logo=rust)](https://www.rust-lang.org/)
-[![Soroban SDK](https://img.shields.io/badge/Soroban-SDK%20v22-blue?logo=stellar)](https://github.com/stellar/rs-soroban-sdk)
-[![License](https://img.shields.io/badge/License-MIT-green)](./LICENSE)
-[![Tests](https://github.com/kenedybok3/SAFE-HAVEN/actions/workflows/ci.yml/badge.svg)](https://github.com/kenedybok3/SAFE-HAVEN/actions)
+## Microservices Architecture (Issue #963)
 
-A production-ready decentralized vault on the Stellar blockchain (Soroban) — with a full React/TypeScript frontend.
+This document defines the service boundaries, communication protocol, shared library,
+service discovery, and migration path for extracting services from the monolith.
 
-Tokens are locked in the smart contract until a future timestamp. Early exits are possible with a configurable penalty. Admin rights can be permanently renounced for fully trustless operation.
+### Service Boundaries
 
----
+Services are split along domain boundaries so each can scale and deploy independently:
 
-## Project Structure
+| Service | Domain | Responsibility |
+|---------|--------|----------------|
+| `api-gateway` | Edge | Request routing, auth, rate limiting |
+| `metrics-service` | Observability | Metrics collection and aggregation |
+| `config-service` | Configuration | Centralized config distribution |
+| `backup-service` | Data lifecycle | Backups and disaster recovery |
 
-```
-SAFE-HAVEN/
-├── contracts/safe-haven/       Smart contract (Rust / Soroban)
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs              Crate root
-│       ├── contract.rs         All public entry points
-│       ├── types.rs            VaultKey, VaultEntry, constants
-│       ├── errors.rs           VaultError enum (14 codes)
-│       ├── events.rs           Event emission helpers
-│       ├── storage.rs          Persistent storage + TTL helpers
-│       └── test.rs             48+ unit tests
-│
-├── frontend/                   React + TypeScript + Vite (UI)
-│   ├── src/
-│   │   ├── App.tsx
-│   │   ├── config.ts           Contract ID, RPC URLs
-│   │   ├── context/            Freighter wallet
-│   │   ├── hooks/              useDeposits, useContractInfo
-│   │   ├── lib/                Stellar SDK helpers, formatting
-│   │   ├── components/         Header, TabNav, DepositCard, etc.
-│   │   └── pages/              Dashboard, Deposit, Withdraw, Admin
-│   ├── .env.example
-│   └── README.md
-│
-├── Cargo.toml                  Rust workspace
-├── Makefile                    Build / test / lint / deploy
-└── STRUCTURE.md                Detailed project layout
-```
+Each service owns its data and exposes a versioned API. No service reaches into
+another service's storage directly.
 
----
+### Inter-Service Communication Protocol
 
-## Quick Start
+- **Synchronous:** HTTP/JSON over internal network for request/response calls.
+  - Versioned paths: `/v1/<resource>`
+  - Standard error envelope: `{ "error": { "code": string, "message": string } }`
+  - Health endpoint on every service: `GET /healthz`
+- **Asynchronous:** out of scope for this issue (message queues deferred).
 
-### Smart Contract
+### Shared Library
 
-```bash
-# Prerequisites
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup target add wasm32-unknown-unknown
-cargo install --locked soroban-cli
+Common functionality (config loading, error types, metrics helpers, HTTP client)
+lives in a shared crate consumed by all services to avoid duplication.
 
-# Optional: jq for JSON parsing in smoke tests (apt-get install jq / brew install jq)
+### Service Discovery
 
-# One-shot: install all recommended dev tools
-make install-tools
+- Services register themselves on startup and expose `GET /healthz`.
+- The gateway resolves upstream instances via the discovery registry and performs
+  health-checked load balancing.
+- Discovery is environment-configurable so local and production setups differ only
+  by configuration.
 
-# Build
-make build
+### Migration Path
 
-# Test
-make test
+1. Extract the first service (`metrics-service`) behind the gateway.
+2. Route a percentage of traffic to the extracted service; keep the monolith as fallback.
+3. Extract remaining services one at a time following the same pattern.
+4. Decommission monolith routes once all traffic is served by extracted services.
 
-# Run all tests on file change (requires cargo-watch, installed by make install-tools)
-make watch
+### Acceptance Criteria Mapping
 
+- Service boundaries: defined above.
+- Communication protocol: documented above.
+- Independent deployment: each service has its own build/deploy target.
+- Service discovery: registry + health checks described above.
+- First service extracted: `metrics-service`.
 # Full local dev environment (build + deploy + frontend)
 make dev
 
@@ -97,6 +82,22 @@ npm run dev            # -> http://localhost:5173
 See [`frontend/README.md`](./frontend/README.md) for the full frontend guide.
 
 See [`DISASTER_RECOVERY.md`](./DISASTER_RECOVERY.md) for disaster scenarios, recovery procedures, roles, and escalation rules.
+
+### API Documentation
+
+The contract exposes a comprehensive public API. Developers should start with these resources:
+
+| Document | Purpose |
+|----------|---------|
+| [`docs/API_COMPREHENSIVE.md`](./docs/API_COMPREHENSIVE.md) | **Complete API reference** — all endpoints, parameters, types, and error codes |
+| [`docs/API_EXAMPLES.md`](./docs/API_EXAMPLES.md) | **Ready-to-use code examples** — copy-pasteable CLI and TypeScript patterns for common workflows |
+| [`docs/API_QUICK_REFERENCE.md`](./docs/API_QUICK_REFERENCE.md) | **Quick lookup card** — function signatures, constants, common errors, checklists |
+| [`docs/API.md`](./docs/API.md) | **CLI-focused guide** — Soroban CLI examples for all operations |
+
+**Getting Started**:
+1. Read [`docs/API_QUICK_REFERENCE.md`](./docs/API_QUICK_REFERENCE.md) (5 min)
+2. Copy an example from [`docs/API_EXAMPLES.md`](./docs/API_EXAMPLES.md)
+3. Reference full details in [`docs/API_COMPREHENSIVE.md`](./docs/API_COMPREHENSIVE.md) as needed
 
 See [`MONITORING.md`](./MONITORING.md) for contract health checks, alert thresholds, storage/TTL monitoring, and failed-transaction observability.
 
@@ -1126,3 +1127,6 @@ MIT
 
 <!-- handsoff-issue-902 -->
 - #902: Issue #11: Withdrawal Fee Calculation Accuracy
+
+<!-- handsoff-issue-970 -->
+- #970: Fix N+1 query problems in report generation

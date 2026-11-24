@@ -1,0 +1,21 @@
+{
+  "description": "Baseline performance metrics for automated regression testing (issue #977).",
+  "version": 1,
+  "thresholds": {
+    "responseTimePercent": 10,
+    "memoryUsagePercent": 15
+  },
+  "metrics": {
+    "responseTimeMs": {
+      "value": 120,
+      "unit": "ms",
+      "description": "Median response time for the core request path."
+    },
+    "memoryUsageMb": {
+      "value": 64,
+      "unit": "MB",
+      "description": "Peak resident memory during the benchmark run."
+    }
+  },
+  "history": []
+}

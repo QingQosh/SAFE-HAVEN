@@ -26,7 +26,23 @@ pub const MIN_LOCK_LEDGERS: u32 = (MIN_LOCK_DURATION_SECS / LEDGER_SECONDS) as u
 pub const EPOCH_SIZE_LEDGERS: u32 = 1_440;
 pub const WITHDRAWAL_LIMIT_PER_EPOCH: i128 = 50_000_000;
 pub const RENEWABLE_ENERGY_BASELINE: u32 = 50;
+/// Carbon baseline: grams CO2e per token base unit per second.
+///
+/// A deposit of `amount` base units locked for `duration` seconds emits
+/// `amount * duration * CARBON_BASELINE_PER_UNIT_SECOND` grams of CO2e
+/// (before any renewable-energy offset is applied).
 pub const CARBON_BASELINE_PER_UNIT_SECOND: i128 = 1;
+
+/// Theoretical maximum carbon footprint in grams CO2e.
+///
+/// Computed as `MAX_DEPOSIT_AMOUNT * MAX_LOCK_DURATION_SECS * CARBON_BASELINE_PER_UNIT_SECOND`
+/// = 10^15 * 157_788_000 * 1 ≈ 1.57788 × 10^23 grams CO2e.
+///
+/// This is far below `i128::MAX` (~1.7 × 10^38), so carbon arithmetic cannot
+/// overflow for any valid deposit/lock combination.
+pub const MAX_CARBON_FOOTPRINT: i128 =
+    MAX_DEPOSIT_AMOUNT * (MAX_LOCK_DURATION_SECS as i128) * CARBON_BASELINE_PER_UNIT_SECOND;
+
 /// Maximum number of ledgers allowed for a ledger-based deposit, equivalent to
 /// `MAX_LOCK_DURATION_SECS` converted at the nominal 5-second ledger rate.
 ///
@@ -67,5 +83,34 @@ pub const MEV_PRICE_DEVIATION_THRESHOLD_BPS: u32 = 200;
 /// Baseline renewable energy percentage for deposits (default 50%)
 pub const RENEWABLE_ENERGY_BASELINE: u32 = 50;
 
-/// Carbon baseline: grams CO2e per unit per second (1 gram per unit-second)
+/// Carbon baseline: grams CO2e per unit per second (1 gram per unit-second).
+///
+/// This is the baseline coefficient used by the deposit carbon footprint
+/// formula:
+///
+/// ```text
+/// carbon_footprint = amount × duration_seconds × CARBON_BASELINE_PER_UNIT_SECOND
+/// ```
+///
+/// With the default value of `1`, a deposit of 1000 units locked for 86400
+/// seconds (1 day) yields 86,400,000 grams CO2e.  The maximum deposit
+/// (`MAX_DEPOSIT_AMOUNT` = 10^15) locked for the maximum duration
+/// (`MAX_LOCK_DURATION_SECS` = 157,788,000 s) yields
+/// 1.57788 × 10^23 grams CO2e, which fits comfortably within `i128`.
 pub const CARBON_BASELINE_PER_UNIT_SECOND: i128 = 1;
+
+// ================================================================
+// SUSTAINABILITY MILESTONE CONSTANTS
+// ================================================================
+
+/// Threshold for the `LargeOffset` milestone: 1 billion grams CO2e (1000 tonnes).
+///
+/// When a depositor's cumulative carbon offset reaches this value, the
+/// `LargeOffset` milestone is emitted exactly once (tracked via bitmap flag).
+pub const LARGE_OFFSET_THRESHOLD: i128 = 1_000_000_000;
+
+/// Milestone bitmap bit for the `CarbonNegative` milestone (bit 2, value 4).
+pub const CARBON_NEGATIVE_BIT: u32 = 4;
+
+/// Milestone bitmap bit for the `LargeOffset` milestone (bit 3, value 8).
+pub const LARGE_OFFSET_BIT: u32 = 8;

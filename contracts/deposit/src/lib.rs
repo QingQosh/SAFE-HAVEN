@@ -86,6 +86,13 @@ impl DepositContract {
     }
 }
 
+// NOTE (issue #831): This contract stores only deposit records and holds no
+// sustainability metrics or aggregate state. Metrics are owned by the
+// safe-haven contract, which creates them on deposit and removes them on
+// withdraw/cancel. Because nothing here caches or mirrors those metrics, the
+// deposit contract cannot retain stale sustainability state and requires no
+// lifecycle hooks for metric cleanup.
+
 #[cfg(test)]
 mod test {
     use super::*;

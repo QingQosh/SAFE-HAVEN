@@ -42,6 +42,18 @@
     "HODL",
     "trustless",
     "ramp",
-    "onramp"
+    "onramp",
+    "idempotency",
+    "idempotent",
+    "atomicity",
+    "contractimpl",
+    "contracterror",
+    "VaultKey",
+    "VaultEntry",
+    "VaultError",
+    "Soroban",
+    "re-initialization",
+    "bitmask",
+    "TTL"
   ]
 }

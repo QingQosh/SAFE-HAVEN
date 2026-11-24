@@ -1,11 +1,15 @@
 [workspace]
 members = [
     "contracts/safe-haven",
+    "services/shared",
+    "services/discovery",
 ]
 resolver = "2"
 
 [workspace.dependencies]
 soroban-sdk = { version = "22.0.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [profile.release]
 opt-level = "z"
@@ -20,6 +24,16 @@ lto = true
 [profile.release-with-logs]
 inherits = "release"
 debug-assertions = true
+
+[profile.bench]
+inherits = "release"
+debug = true
+
+[profile.test]
+# Keep unit tests fast (issue #980: tests must run in under 30 seconds).
+opt-level = 0
+debug = true
+incremental = true
 
 [workspace.metadata]
 homepage = "https://github.com/kenedybok3/SAFE-HAVEN"

@@ -131,29 +131,24 @@ pub enum VaultKey {
     SustainabilityMetrics(Address, u32),
     TotalCarbonFootprint(Address),
     TotalCarbonOffset(Address),
+    /// Per-depositor bitmap of achieved sustainability milestones (issue #830).
+    ///
+    /// Stores a `u32` where each of the 4 low bits represents one milestone:
+    /// - bit 0: first milestone achieved
+    /// - bit 1: second milestone achieved
+    /// - bit 2: third milestone achieved
+    /// - bit 3: fourth milestone achieved
+    ///
+    /// A bit is set exactly once, the first time the corresponding milestone is
+    /// achieved, and is never cleared. This guarantees each milestone event is
+    /// emitted at most once per depositor (no duplicate emissions).
     MilestoneAchieved(Address),
     /// NFT evolution record: maps (depositor, deposit_id) to NFTEvolutionRecord
     NFTEvolution(Address, u32),
-    /// Number of stakers stored in the indexed list after the legacy list.
-    StakerCount,
-    /// Staker address at an index after the legacy list.
-    StakerListEntry(u32),
-    /// Sustainability metrics for a deposit (depositor, deposit_id) -> SustainabilityMetrics
-    SustainabilityMetrics(Address, u32),
-    /// Total carbon footprint for a depositor
-    TotalCarbonFootprint(Address),
-    /// Total carbon offset for a depositor
-    TotalCarbonOffset(Address),
-    /// MEV commitment for a deposit (depositor, deposit_id) -> MEVCommitment
-    MEVCommitment(Address, u32),
-    /// MEV status for a deposit (depositor, deposit_id) -> MEVStatus
-    MEVStatus(Address, u32),
-    /// MEV detection list for a deposit (depositor, deposit_id) -> Vec<MEVDetection>
-    MEVDetections(Address, u32),
-    /// MEV recovery pool total
-    MEVRecoveryPool,
-    /// MEV recovery owed to a depositor
-    MEVRecoveryOwed(Address),
+    /// Incremented whenever rewards are replenished
+    RewardsPoolGeneration,
+    /// Pool generation claimed by each staker
+    StakerRewardsClaimedGeneration(Address),
 }
 
 #[contracttype]
@@ -302,6 +297,8 @@ pub struct InsuranceClaim {
     pub amount_requested: i128,
     pub incident_evidence: String,
     pub status: ClaimStatus,
+}
+
 /// Sponsorship fund configuration and state
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -333,6 +330,11 @@ pub struct SessionKeyEntry {
     pub amount_used: i128,
     /// Timestamp when this session key was created
     pub created_at: u64,
+}
+
+/// Sponsorship fund configuration and state
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SponsorshipFund {
     /// Balance of native tokens available for sponsorship
     pub balance: i128,
@@ -478,6 +480,50 @@ pub struct BatchWithdrawalResult {
 
 /// Environmental impact tracking for a single deposit.
 /// Tracks carbon footprint and renewable energy assumptions.
+///
+/// # Carbon Footprint Methodology
+///
+/// The carbon footprint estimates the energy-related emissions attributable to
+/// a deposit over its lifetime. All carbon values are denominated in
+/// **grams of CO2 equivalent (g CO2e)**.
+///
+/// ## Formula
+///
+/// ```text
+/// carbon_footprint = amount × duration_seconds × CARBON_BASELINE_PER_UNIT_SECOND
+/// ```
+///
+/// Where:
+/// - `amount` — the deposited token amount (in the token's smallest unit).
+/// - `duration_seconds` — the lock duration of the deposit, in seconds.
+/// - `CARBON_BASELINE_PER_UNIT_SECOND` — the carbon baseline, defined as
+///   **1 g CO2e per unit per second**. This is the assumed emissions rate for
+///   one unit of value held for one second.
+///
+/// ## Example
+///
+/// A deposit of `1_000` units locked for `86_400` seconds (1 day):
+///
+/// ```text
+/// carbon_footprint = 1_000 × 86_400 × 1 = 86_400_000 g CO2e
+/// ```
+///
+/// ## Renewable Energy Percentage
+///
+/// `renewable_energy_percent` is a value in the range `0..=100` representing
+/// the share of energy assumed to come from renewable sources for contract
+/// hosting and network operations. The default is **50** (50% renewable).
+///
+/// ## Carbon Offset
+///
+/// Offsets are derived from the penalty basis points applied to the deposit:
+///
+/// ```text
+/// carbon_offset_grams = carbon_footprint × penalty_bps / 10_000
+/// ```
+///
+/// For example, a footprint of `86_400_000 g CO2e` with `penalty_bps = 500`
+/// (5%) yields `86_400_000 × 500 / 10_000 = 4_320_000 g CO2e` offset.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SustainabilityMetrics {
@@ -485,21 +531,42 @@ pub struct SustainabilityMetrics {
     pub deposit_id: u32,
     /// The depositor address.
     pub depositor: Address,
-    /// Carbon footprint in grams of CO2 equivalent.
-    /// Formula: amount × duration_seconds × CARBON_BASELINE_PER_UNIT_SECOND
+    /// Carbon footprint in grams of CO2 equivalent (g CO2e).
+    /// Formula: `amount × duration_seconds × CARBON_BASELINE_PER_UNIT_SECOND`,
+    /// where the baseline is 1 g CO2e per unit per second.
     pub carbon_footprint: i128,
     /// Percentage of renewable energy (0-100).
     /// Represents the energy mix for contract hosting and network operations.
     /// Default: 50 (50% renewable).
     pub renewable_energy_percent: u32,
     /// Carbon offset in grams CO2e based on penalty basis points.
-    /// Formula: carbon_footprint × (penalty_bps / 10,000)
+    /// Formula: `carbon_footprint × penalty_bps / 10_000`
     pub carbon_offset_grams: i128,
     /// Timestamp when metrics were recorded.
     pub timestamp: u64,
 }
 
 /// Aggregated sustainability report for a depositor across all deposits.
+///
+/// # Report Generation Example
+///
+/// Given two active deposits:
+/// - Deposit A: footprint `86_400_000 g CO2e`, offset `4_320_000 g CO2e`, 50% renewable.
+/// - Deposit B: footprint `43_200_000 g CO2e`, offset `2_160_000 g CO2e`, 50% renewable.
+///
+/// The generated report contains:
+/// - `total_carbon_footprint` = `129_600_000 g CO2e`
+/// - `total_carbon_offset` = `6_480_000 g CO2e`
+/// - `average_renewable_energy_percent` = `50`
+/// - `active_deposit_count` = `2`
+/// - `report_timestamp` = the current ledger timestamp at query time.
+///
+/// # Timestamp Accuracy
+///
+/// `report_timestamp` is sourced live from `env.ledger().timestamp()` at the
+/// moment the report is generated. It has second-level precision, is never
+/// cached or reused from a previous query, and therefore reflects the current
+/// query time. Successive report queries may return different timestamps.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SustainabilityReport {
@@ -513,7 +580,9 @@ pub struct SustainabilityReport {
     pub total_carbon_offset: i128,
     /// Number of active deposits.
     pub active_deposit_count: u32,
-    /// Timestamp when report was generated.
+    /// Timestamp when report was generated, sourced live from
+    /// `env.ledger().timestamp()` at query time (second-level precision,
+    /// never cached).
     pub report_timestamp: u64,
 }
 

@@ -34,10 +34,32 @@ For a small team, one person may hold multiple roles, but the incident commander
 | SEV-1 | Active or likely fund loss, private admin key compromise, or contract-wide integrity failure. | Pause immediately; page security lead and incident commander. | Every 30 minutes until contained. |
 | SEV-2 | Contract vulnerability with no confirmed loss, repeated failed withdrawals, or material data inconsistency. | Restrict deposits, preserve evidence, and start reconciliation. | Every 2 hours. |
 | SEV-3 | Isolated UI, RPC, indexer, or documentation issue with no evidence of incorrect on-chain state. | Route to the owning engineer and monitor. | Daily until resolved. |
+| SEV-4 | Cosmetic or informational issue with no user or fund impact (typos, stale docs, non-blocking warnings). | Log and schedule in normal backlog. | Weekly until resolved. |
 
 Escalate immediately to SEV-1 when any of the following is observed: an unauthorized admin transaction, a token balance decrease not explained by a valid withdrawal, a compromised signer, or evidence that users cannot recover funds through the documented contract paths. Notify the security contact in [SECURITY.md](SECURITY.md) privately; replace its placeholder address before production use.
 
 The incident commander may declare containment only after the security lead confirms that no new unauthorized state changes are occurring and the data owner records the last verified ledger. Public disclosure, user remediation, and unpausing require security and incident-commander approval.
+
+### Escalation chain
+
+1. **On-call engineer** — first responder; triages, assigns an initial severity, and opens the incident channel.
+2. **Incident commander** — paged for SEV-1/SEV-2; owns the timeline and decisions.
+3. **Security lead** — paged for SEV-1 and any suspected exploit; owns containment and disclosure.
+4. **Contract operator / transaction approver** — paged for SEV-1; executes reviewed state changes.
+5. **Engineering lead / maintainers** — engaged when a replacement deployment or cross-team coordination is required.
+6. **Communications owner** — engaged for any user-facing impact.
+
+If a role does not acknowledge within 15 minutes, escalate to the next role in the chain and record the escalation in the incident timeline.
+
+## Incident Response Workflow
+
+Every incident follows the same five phases. Record UTC timestamps for each transition in the incident timeline.
+
+1. **Detect** — an alert, user report, or operator observation opens the incident. Capture symptoms, contract ID, network, and suspected first affected ledger.
+2. **Triage** — assign severity using the table above, page the required roles, and open the private incident channel. Target: severity assigned within 15 minutes of detection.
+3. **Mitigate** — contain the impact (pause, restrict deposits, freeze deployments) and preserve evidence. Do not attempt unreviewed fixes against production state.
+4. **Resolve** — apply the remediation from the matching runbook, verify on-chain state, and confirm the impact is closed.
+5. **Follow-up** — record the final timeline, confirm exit criteria, and hand off any open items to their owners. Post-mortems are tracked separately and are out of scope for this runbook.
 
 ## Common First Response
 
@@ -48,6 +70,39 @@ The incident commander may declare containment only after the security lead conf
 5. Confirm the current admin, pending admin, paused state, contract initialization state, and contract/token balances from more than one trusted RPC or explorer when possible.
 6. Require a second operator to review every recovery transaction’s destination, amount, contract ID, network passphrase, and simulation result.
 7. Keep a transaction ledger containing: UTC time, operator, reviewer, function, depositor, deposit ID, token, amount, transaction hash, result, and evidence link.
+
+## Runbooks for Top 5 Incidents
+
+Each runbook below is a condensed procedure. Follow the Common First Response first, then the matching runbook.
+
+### Runbook 1: Active exploit or contract vulnerability
+
+See [Scenario A: Contract Vulnerability or Active Exploit](#scenario-a-contract-vulnerability-or-active-exploit). Pause the contract, preserve evidence, build and deploy a reviewed replacement, and migrate users through supported contract calls.
+
+### Runbook 2: Compromised admin signer
+
+1. Set SEV-1 and page the security lead and incident commander.
+2. If a safe signer remains, call `pause(admin)` and verify `is_paused() == true` from the network.
+3. Begin a two-step admin transfer to a freshly generated, hardware-backed signer; require a second operator to review the pending-admin transaction.
+4. Do not sign recovery transactions from the compromised key. Reconcile balances and follow Runbook 1 for remediation.
+
+### Runbook 3: Data corruption or state mismatch
+
+See [Scenario B: Data Corruption or State Mismatch](#scenario-b-data-corruption-or-state-mismatch). Treat ledger history as authoritative; reconcile indexer, RPC, and application views against on-chain events before changing state.
+
+### Runbook 4: Failed or stuck withdrawals
+
+1. Set SEV-2 unless fund loss is confirmed.
+2. Reproduce the failure with a read-only simulation; capture the error, deposit ID, token, and amount.
+3. Verify the deposit exists, the contract is not paused, and the token balance covers the withdrawal.
+4. If the contract is paused, follow the unpause approval path; otherwise escalate to the security lead for a contract-level defect.
+
+### Runbook 5: RPC, indexer, or frontend outage
+
+1. Set SEV-3 unless on-chain state is affected.
+2. Confirm the contract is reachable through an alternate trusted RPC or explorer.
+3. Fail over the frontend/RPC configuration and verify read-only queries succeed.
+4. If on-chain state appears inconsistent, escalate to Runbook 3.
 
 ## Scenario A: Contract Vulnerability or Active Exploit
 
@@ -81,70 +136,92 @@ The incident commander may declare containment only after the security lead conf
 
 ### Triage
 
-1. Treat an indexer or frontend mismatch as untrusted application data until independently confirmed. Do not rewrite an index or delete records during investigation.
-2. Compare, for the affected contract and time window: `get_deposit_ids`, `get_vault` or `get_ledger_vault`, `get_depositor_count`, token balances, contract events, transaction results, and ledger sequence/timestamp.
-3. Check both timestamp-based and ledger-based deposits. Ledger-based deposits are read with `get_ledger_vault`; `get_vault` intentionally returns no value for them.
-4. Determine whether the issue is stale RPC data, a missed event, an expired read cache, a frontend parsing error, Soroban persistent-entry TTL behavior, or an actual contract transaction. Record the last consistent ledger and a reproducible query.
+1. Treat an indexer or frontend mismatch as a data incident, not a contract incident, until ledger evidence proves otherwise. Do not pause the contract solely because a dashboard disagrees with the chain.
+2. Compare the same deposit and token across at least two independent RPC providers, a block explorer, and the application index. Record the ledger sequence used for each observation.
+3. Identify the earliest ledger where the observations diverge and the last ledger where they agree.
+4. Preserve raw RPC responses, indexer query output, application logs, and the deployed frontend build hash.
 
 ### Recovery
 
-1. If only the application view is wrong, pause writes to the affected indexer or frontend workflow, replay events from the last verified ledger, and rebuild derived state from on-chain results. Keep the contract paused only if user actions could be misdirected.
-2. If contract storage is missing or inconsistent on-chain, preserve the ledger evidence and escalate to the security lead as SEV-1/SEV-2. Do not fabricate state or credit a user based only on the indexer.
-3. Reconcile every affected `(depositor, deposit_id)` against the token transfer events and current contract balance. Flag any amount that cannot be proven from both sides.
-4. For a verified active deposit with a functioning contract, use the normal `withdraw`/`withdraw_to` path when unlocked, or the reviewed admin `emergency_withdraw` path when emergency recovery is authorized.
-5. For expired or missing persistent entries, document the exact ledger evidence, contract response, RPC endpoint, and attempted remediation. Escalate unresolved cases rather than silently marking them paid.
-6. Restore the indexer from a clean checkpoint, replay through the current ledger, compare totals, and have the data owner sign off before resuming writes or unpausing.
+1. If the contract state is correct and only the index is wrong, rebuild the index from the last agreed ledger. Do not submit on-chain transactions to fix an off-chain view.
+2. If the contract state is wrong, escalate to Scenario A and follow its containment and recovery steps.
+3. Reconcile every affected deposit against on-chain state before restoring user-facing balances or statuses.
+4. Verify the rebuilt index against a second RPC provider before re-enabling deposits or withdrawals in the frontend.
 
 ### Exit criteria
 
-- Derived data matches independently queried on-chain state at a named ledger.
-- Token inflows, outflows, and remaining balances reconcile per asset.
-- A backup/checkpoint and replay procedure are tested and documented.
-- Any unresolved deposits have named owners and user communications.
+- The index and contract state agree at a recorded ledger.
+- The root cause is documented with an owner and a follow-up fix.
+- Users see accurate balances and statuses.
 
-## Scenario C: Admin Key Loss, Compromise, or Lockout
+## Scenario C: Admin Key Compromise
 
-### Determine the state
+1. Set severity to SEV-1 and pause the contract if the compromised signer still has authority.
+2. If the admin is not yet compromised but a pending admin is suspect, cancel or complete the two-step transfer only with security-lead approval and a reviewed transaction.
+3. Rotate the admin signer to a new, independently held key using the two-step transfer. Verify `get_admin()` and `get_pending_admin()` after each step.
+4. Treat all transactions signed by the compromised key after the suspected compromise ledger as unauthorized until proven otherwise.
+5. Follow Scenario A for any resulting fund movement and user remediation.
 
-1. Set severity to SEV-1 for suspected compromise and SEV-2 for accidental loss without evidence of misuse.
-2. Query `get_admin()` and `get_pending_admin()` from a trusted RPC. Confirm whether the current signer is the stored admin, whether the contract is paused, and whether a transfer is pending.
-3. Check recent admin events and transactions for `pause`, `unpause`, `emergency_withdraw`, `transfer_admin`, `accept_admin`, `cancel_transfer_admin`, and `renounce_admin`.
+## Scenario D: RPC or Infrastructure Outage
 
-### Recovery paths
+1. Confirm the outage is external by checking multiple RPC providers and the network status page.
+2. Keep the contract state unchanged. Do not pause for a read-only outage unless withdrawals are failing in a way that risks funds.
+3. Switch the frontend and indexer to a healthy RPC provider and record the change.
+4. Communicate degraded service to users and restore normal operation once providers recover.
 
-1. **Known-good current admin available:** rotate immediately with `transfer_admin(admin, new_admin)`. Have the new admin call `accept_admin(new_admin)`. Verify both `get_admin()` and `get_pending_admin()` before and after acceptance.
-2. **Pending admin available:** have the intended new admin call `accept_admin(new_admin)`, then rotate again to the approved operational signer if needed. If the pending address is wrong and the current admin is available, call `cancel_transfer_admin(admin)` first.
-3. **Key suspected compromised:** from the known-good signer, call `pause(admin)` first, then transfer admin to a clean signer. Revoke or quarantine the compromised key, inspect all transactions it signed, and treat any unexplained emergency withdrawal as a security incident.
-4. **Key lost but an approved backup signer exists:** use the backup only if it is the actual stored admin address or is already the pending admin. A separate backup key cannot take control by itself; the contract has no recovery override.
-5. **Key lost and no pending/backup authority exists:** the deployed contract cannot be administered. Users can still use normal permissionless withdrawal paths when their deposits unlock, but emergency withdrawal, pause, and admin rotation are unavailable. Deploy a new contract for future deposits and communicate the limitation.
-6. **Admin renounced:** treat admin recovery as impossible by design. `renounce_admin` permanently removes the admin; no new admin can be installed. Use permissionless withdrawals and a new deployment for future deposits.
+## Backup and Recovery of Operational Data
 
-### Prevention and readiness
+On-chain state is authoritative and does not require backups. Operational data that must be backed up includes the application index/database, deployment configuration, and incident evidence.
 
-- Keep the operational admin in a hardware-backed or multisignature account where the deployment model supports it.
-- Store encrypted offline backups and test restoration without exposing production secrets.
-- Use two-person approval for emergency withdrawals, renunciation, admin transfer, and unpause.
-- Record the current admin, pending admin, contract ID, network, and verified signer ownership in the restricted operations inventory.
+### Automated daily backups
 
-## Communications and Closure
+- A scheduled job runs daily and produces an encrypted database dump plus the current deployment configuration.
+- Backups are written to durable, access-controlled storage separate from the primary database host.
+- Each backup records a UTC timestamp, checksum, size, and the source database version.
+- Backups are encrypted at rest and in transit; encryption keys are stored separately from the backup data.
 
-The communications owner should publish only verified facts: affected network and contract ID, incident start/containment ledger, whether deposits are paused, user action required, and the next update time. Never publish private keys or speculate about individual balances.
+### Retention policy
 
-Close the incident only after the incident commander has accepted the security assessment, reconciliation report, transaction ledger, deployment or indexer verification, user communication record, and a follow-up list with owners and due dates. The security lead should also decide whether coordinated vulnerability disclosure or regulator/legal notification is required.
+| Tier | Retention | Purpose |
+|---|---|---|
+| Daily | 30 days | Routine recovery and short-term rollback. |
+| Weekly | 12 weeks | Medium-term recovery and trend analysis. |
+| Monthly | 12 months | Compliance and audit evidence. |
 
-## Useful Read-Only Checks
+Retention meets the compliance requirement of at least 12 months of monthly backups. Expired backups are deleted automatically by the retention job; deletion is logged.
 
-Use the project’s configured Soroban RPC and network passphrase. Substitute the real contract ID and address values; do not put secrets in shell history.
+### Backup monitoring and alerts
 
-```bash
-soroban contract invoke --id "$CONTRACT_ID" --network testnet --rpc-url "$RPC_URL" \
-  --network-passphrase "$NETWORK_PASSPHRASE" -- get_admin
-soroban contract invoke --id "$CONTRACT_ID" --network testnet --rpc-url "$RPC_URL" \
-  --network-passphrase "$NETWORK_PASSPHRASE" -- get_pending_admin
-soroban contract invoke --id "$CONTRACT_ID" --network testnet --rpc-url "$RPC_URL" \
-  --network-passphrase "$NETWORK_PASSPHRASE" -- is_paused
-soroban contract invoke --id "$CONTRACT_ID" --network testnet --rpc-url "$RPC_URL" \
-  --network-passphrase "$NETWORK_PASSPHRASE" -- get_deposit_ids --depositor "$DEPOSITOR"
-```
+- The backup job emits a success or failure signal on completion.
+- An alert fires if a daily backup does not complete successfully within its scheduled window, if the backup checksum fails verification, or if no successful backup exists in the last 26 hours.
+- Alerts route to the on-call engineer and the data/reconciliation owner.
+- A failed backup is treated as a SEV-2 data incident until a verified backup exists.
 
-Before production, replace the placeholder security email in [SECURITY.md](SECURITY.md), document the production RPC and custody arrangement in restricted operator records, and test this runbook on testnet with an approved incident exercise.
+### Restoration procedure
+
+1. Select the most recent backup that passes checksum verification.
+2. Restore into an isolated environment, never directly over production.
+3. Verify row counts, key tables, and a sample of deposits against on-chain state at the backup’s recorded ledger.
+4. Record the restore start and end time; restoration must complete in under 1 hour.
+5. Promote the restored database only after reconciliation sign-off.
+
+### Monthly restoration test
+
+- On the first business day of each month, restore the latest monthly backup into an isolated environment and run the verification steps above.
+- Record the test date, operator, backup used, restore duration, and verification result in the incident log.
+- A failed or overdue restoration test is a SEV-2 data incident and must be resolved before the next monthly cycle.
+
+## Communications
+
+- Use approved channels only. Do not speculate about cause, impact, or timelines before the security lead confirms them.
+- Provide users with the contract ID, affected functions, and the exact recovery steps they must take themselves.
+- Never request secret keys, seed phrases, or signed transactions from users.
+
+## Post-Incident Review
+
+1. Hold a blameless review within five business days of closure.
+2. Document the timeline, root cause, impact, detection gaps, and follow-up actions with owners and due dates.
+3. Update this runbook, [MONITORING.md](MONITORING.md), and tests based on lessons learned.
+1. Treat an indexer or fronte
+
+/* … truncated 6667 chars — edit only what you need near the top … */

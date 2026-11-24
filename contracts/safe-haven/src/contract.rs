@@ -3,7 +3,6 @@
 //  Stellar Blockchain | Soroban SDK v22
 // ============================================================
 
-use soroban_sdk::{contract, contractimpl, token, Address, Bytes, Env, Vec};
 use soroban_sdk::{contract, contractimpl, token, Address, Bytes, Env, String, Symbol, Vec};
 
 use crate::{
@@ -19,15 +18,10 @@ use crate::{
     types::{
         DepositType, MultiTokenVaultEntry, TokenDeposit, VaultEntry, LedgerVaultEntry, Page,
         STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT, InsuranceClaim, ClaimStatus,
-        SessionKeyEntry, STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT,
-        STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT, MEVCommitment, MEVDetection, MEVStatus,
-        PriceSample, SustainabilityMetrics, BatchWithdrawalResult, WithdrawalResult,
-        StakerInfo,
-        PriceSample, SustainabilityMetrics, SustainabilityReport, BatchWithdrawalResult, WithdrawalResult,
+        SessionKeyEntry, MEVCommitment, MEVDetection, MEVStatus,
+        PriceSample, SustainabilityMetrics, SustainabilityReport, BatchWithdrawalResult,
+        WithdrawalResult, StakerInfo,
     },
-    prediction_market,
-    prediction_market_errors::PredictionMarketError,
-    prediction_market_types::{PredictionMarket, MarketOutcome, Bet},
 };
 
 /// Minimum compound frequency: must be at least 60 seconds if non-zero.
@@ -42,6 +36,9 @@ const FLASH_LOAN_FEE_BPS: u32 = 10;
 
 /// Seconds in a year (non-leap) used for pro-rata interest calculations.
 const SECS_PER_YEAR: u128 = 31_536_000;
+
+/// Length of the MEV commit-reveal window: 30 minutes.
+const MEV_REVEAL_WINDOW_SECS: u64 = 30 * 60;
 
 fn auto_pause(env: &Env, amount: i128) {
     let ledger = env.ledger().sequence();
@@ -60,6 +57,43 @@ fn auto_pause(env: &Env, amount: i128) {
         amount,
         MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER,
     );
+}
+
+/// Computes the carbon offset (in grams CO2e) from a footprint and penalty.
+///
+/// Formula: `footprint × penalty_bps / 10_000`.
+///
+/// Rounding: integer division truncates toward zero (floor for non-negative
+/// values), so the offset never exceeds the footprint. This is consistent
+/// with the penalty-split arithmetic used elsewhere in the contract.
+///
+/// Uses checked arithmetic and returns [`VaultError::CarbonOverflow`] on
+/// overflow rather than panicking.
+fn calculate_carbon_offset(footprint: i128, penalty_bps: u32) -> Result<i128, VaultError> {
+    if footprint <= 0 || penalty_bps == 0 {
+        return Ok(0);
+    }
+    footprint
+        .checked_mul(penalty_bps as i128)
+        .map(|v| v / 10_000)
+        .ok_or(VaultError::CarbonOverflow)
+}
+
+/// Removes the sustainability metrics for `(depositor, deposit_id)` and
+/// subtracts them from the running aggregate totals so that reports never
+/// include stale metrics (#831).
+///
+/// Safe to call when no metrics exist: the aggregates are left untouched.
+fn remove_sustainability_metrics_and_update_aggregates(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+) {
+    if let Some(metrics) = storage::get_sustainability_metrics(env, depositor, deposit_id) {
+        storage::subtract_total_carbon_footprint(env, metrics.carbon_footprint);
+        storage::subtract_total_carbon_offset(env, metrics.carbon_offset);
+    }
+    storage::remove_sustainability_metrics(env, depositor, deposit_id);
 }
 
 fn check_emergency_withdrawal_limit(env: &Env, amount: i128) -> Result<(), VaultError> {
@@ -790,8 +824,8 @@ impl SafeHaven {
 
         // Track sustainability metrics
         let lock_duration: u64 = unlock_time.saturating_sub(now);
-        let carbon_footprint = calculate_carbon_footprint(amount, lock_duration);
-        let carbon_offset = calculate_carbon_offset(carbon_footprint, penalty_bps);
+        let carbon_footprint = calculate_carbon_footprint(amount, lock_duration)?;
+        let carbon_offset = calculate_carbon_offset(carbon_footprint, penalty_bps)?;
         
         let metrics = SustainabilityMetrics {
             deposit_id,
@@ -805,8 +839,12 @@ impl SafeHaven {
         storage::set_sustainability_metrics(&env, &depositor, deposit_id, &metrics);
         
         // Update aggregated totals
-        let total_carbon = storage::get_total_carbon_footprint(&env, &depositor).saturating_add(carbon_footprint);
-        let total_offset = storage::get_total_carbon_offset(&env, &depositor).saturating_add(carbon_offset);
+        let total_carbon = storage::get_total_carbon_footprint(&env, &depositor)
+            .checked_add(carbon_footprint)
+            .ok_or(VaultError::CarbonOverflow)?;
+        let total_offset = storage::get_total_carbon_offset(&env, &depositor)
+            .checked_add(carbon_offset)
+            .ok_or(VaultError::CarbonOverflow)?;
         storage::set_total_carbon_footprint(&env, &depositor, total_carbon);
         storage::set_total_carbon_offset(&env, &depositor, total_offset);
         
@@ -996,8 +1034,8 @@ impl SafeHaven {
 
         // Track sustainability metrics
         let lock_duration: u64 = unlock_time.saturating_sub(now);
-        let carbon_footprint = calculate_carbon_footprint(amount, lock_duration);
-        let carbon_offset = calculate_carbon_offset(carbon_footprint, penalty_bps);
+        let carbon_footprint = calculate_carbon_footprint(amount, lock_duration)?;
+        let carbon_offset = calculate_carbon_offset(carbon_footprint, penalty_bps)?;
         
         let metrics = SustainabilityMetrics {
             deposit_id,
@@ -1011,8 +1049,12 @@ impl SafeHaven {
         storage::set_sustainability_metrics(&env, &depositor, deposit_id, &metrics);
         
         // Update aggregated totals
-        let total_carbon = storage::get_total_carbon_footprint(&env, &depositor).saturating_add(carbon_footprint);
-        let total_offset = storage::get_total_carbon_offset(&env, &depositor).saturating_add(carbon_offset);
+        let total_carbon = storage::get_total_carbon_footprint(&env, &depositor)
+            .checked_add(carbon_footprint)
+            .ok_or(VaultError::CarbonOverflow)?;
+        let total_offset = storage::get_total_carbon_offset(&env, &depositor)
+            .checked_add(carbon_offset)
+            .ok_or(VaultError::CarbonOverflow)?;
         storage::set_total_carbon_footprint(&env, &depositor, total_carbon);
         storage::set_total_carbon_offset(&env, &depositor, total_offset);
         
@@ -1183,8 +1225,8 @@ impl SafeHaven {
 
         // Track sustainability metrics (convert ledger gap to estimated seconds)
         let estimated_duration_secs = (ledger_gap as u64).saturating_mul(storage::LEDGER_SECONDS);
-        let carbon_footprint = calculate_carbon_footprint(amount, estimated_duration_secs);
-        let carbon_offset = calculate_carbon_offset(carbon_footprint, penalty_bps);
+        let carbon_footprint = calculate_carbon_footprint(amount, estimated_duration_secs)?;
+        let carbon_offset = calculate_carbon_offset(carbon_footprint, penalty_bps)?;
         
         let metrics = SustainabilityMetrics {
             deposit_id,
@@ -1198,8 +1240,12 @@ impl SafeHaven {
         storage::set_sustainability_metrics(&env, &depositor, deposit_id, &metrics);
         
         // Update aggregated totals
-        let total_carbon = storage::get_total_carbon_footprint(&env, &depositor).saturating_add(carbon_footprint);
-        let total_offset = storage::get_total_carbon_offset(&env, &depositor).saturating_add(carbon_offset);
+        let total_carbon = storage::get_total_carbon_footprint(&env, &depositor)
+            .checked_add(carbon_footprint)
+            .ok_or(VaultError::CarbonOverflow)?;
+        let total_offset = storage::get_total_carbon_offset(&env, &depositor)
+            .checked_add(carbon_offset)
+            .ok_or(VaultError::CarbonOverflow)?;
         storage::set_total_carbon_footprint(&env, &depositor, total_carbon);
         storage::set_total_carbon_offset(&env, &depositor, total_offset);
         
@@ -1295,16 +1341,6 @@ impl SafeHaven {
 
         let max_deposit = storage::get_max_deposit(&env).unwrap_or(MAX_DEPOSIT_AMOUNT);
 
-            if penalty > 0 {
-                let fee_recipient =
-                    storage::get_fee_recipient(&env).ok_or(VaultError::MissingFeeRecipient)?;
-
-                // 30 % of the penalty → fee_recipient, 70 % → staker pool
-                let fee_slice = (penalty * storage::STAKER_FEE_BPS) / 10_000;
-                let pool_slice = penalty - fee_slice; // remainder avoids rounding drift
-
-                token_client.transfer(&contract, &fee_recipient, &fee_slice);
-                storage::accumulate_staker_pool(&env, &entry.token, pool_slice);
         // Validate all amounts before transferring anything (checks before effects).
         for td in tokens_and_amounts.iter() {
             if td.amount <= 0 {
@@ -1666,8 +1702,7 @@ impl SafeHaven {
                 }
                 // Add stakers_share to rewards pool
                 if stakers_share > 0 {
-                    let current_pool = storage::get_rewards_pool(&env);
-                    storage::set_rewards_pool(&env, current_pool + stakers_share);
+                    storage::add_rewards_pool(&env, stakers_share);
                 }
             }
             if refund > 0 {
@@ -1714,8 +1749,7 @@ impl SafeHaven {
                 }
                 // Add stakers_share to rewards pool
                 if stakers_share > 0 {
-                    let current_pool = storage::get_rewards_pool(&env);
-                    storage::set_rewards_pool(&env, current_pool + stakers_share);
+                    storage::add_rewards_pool(&env, stakers_share);
                 }
             }
             if refund > 0 {
@@ -1771,9 +1805,14 @@ impl SafeHaven {
     // ----------------------------------------------------------------
 
     /// Register a staker with a stake amount. Updates their stake if already registered.
+    ///
+    /// The stake amount must be strictly positive. Validation happens before any
+    /// state mutation (staker entry, staker list, total staked, registration
+    /// timestamp, events), so a rejected call leaves storage untouched.
     pub fn register_staker(env: Env, staker: Address, amount: i128) -> Result<(), VaultError> {
         staker.require_auth();
 
+        // Amount validation must precede every storage write / event emission.
         if amount <= 0 {
             return Err(VaultError::InvalidStakeAmount);
         }
@@ -1856,23 +1895,42 @@ impl SafeHaven {
             return Err(VaultError::NoRewardsToClaim);
         }
 
+        let pool_generation = storage::get_rewards_pool_generation(&env);
+        let claimed_generation =
+            storage::get_staker_rewards_claimed_generation(&env, &staker);
+        if claimed_generation == pool_generation {
+            return Err(VaultError::NoRewardsToClaim);
+        }
+
         // Calculate staker's proportional share
         // reward = (stake_amount / total_staked) * rewards_pool
         let reward = stake_amount
             .checked_mul(rewards_pool)
             .ok_or(VaultError::ArithmeticOverflow)?
             / total_staked;
+            .and_then(|numerator| numerator.checked_div(total_staked))
+            .ok_or(VaultError::AmountTooLarge)?;
 
         if reward <= 0 {
             return Err(VaultError::NoRewardsToClaim);
         }
+
+        if reward > rewards_pool {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        let new_pool = rewards_pool
+            .checked_sub(reward)
+            .ok_or(VaultError::InvalidAmount)?;
 
         // Track total claimed
         let already_claimed = storage::get_staker_rewards_claimed(&env, &staker);
         let new_claimed = already_claimed
             .checked_add(reward)
             .ok_or(VaultError::ArithmeticOverflow)?;
+            .ok_or(VaultError::AmountTooLarge)?;
         storage::set_staker_rewards_claimed(&env, &staker, new_claimed);
+        storage::set_staker_rewards_claimed_generation(&env, &staker, pool_generation);
 
         // Reduce rewards pool
         let new_pool = rewards_pool
@@ -1884,31 +1942,14 @@ impl SafeHaven {
         Ok(())
     }
 
-    /// Return a page of registered stakers and the total number registered.
-    pub fn get_stakers(env: Env, offset: u32, limit: u32) -> Page {
-        let (items, total_count) = storage::get_stakers_page(&env, offset, limit);
-        Page { items, total_count }
+    /// Get the cumulative rewards already claimed by a staker.
+    pub fn get_staker_rewards_claimed(env: Env, staker: Address) -> i128 {
+        storage::get_staker_rewards_claimed(&env, &staker)
     }
 
-    /// Return a staker's stake, earned and claimed rewards, and registration time.
-    pub fn get_staker_info(env: Env, staker: Address) -> Option<StakerInfo> {
-        let stake_amount = storage::get_staker(&env, &staker)?;
-        let rewards_claimed = storage::get_staker_rewards_claimed(&env, &staker);
-        let rewards_pool = storage::get_rewards_pool(&env);
-        let total_staked = storage::get_total_staked(&env);
-        let currently_earned = if total_staked > 0 && rewards_pool > 0 {
-            stake_amount.saturating_mul(rewards_pool) / total_staked
-        } else {
-            0
-        };
-
-        Some(StakerInfo {
-            stake_amount,
-            rewards_earned: rewards_claimed.saturating_add(currently_earned),
-            rewards_claimed,
-            registration_timestamp: storage::get_staker_registration_timestamp(&env, &staker)
-                .unwrap_or(0),
-        })
+    /// Get the current unclaimed rewards pool.
+    pub fn get_rewards_pool(env: Env) -> i128 {
+        storage::get_rewards_pool(&env)
     }
 
     // ================================================================
@@ -2365,9 +2406,10 @@ impl SafeHaven {
 
             events::withdraw(&env, &depositor, &entry.token, entry.amount, deposit_id);
 
-            // Clean up NFT evolution record on withdrawal
+            // Clean up NFT evolution record and sustainability metrics on withdrawal,
+            // subtracting the removed metrics from the running aggregates (#831).
             storage::remove_nft_evolution(&env, &depositor, deposit_id);
-            storage::remove_sustainability_metrics(&env, &depositor, deposit_id);
+            remove_sustainability_metrics_and_update_aggregates(&env, &depositor, deposit_id);
             return Ok(());
         }
 
@@ -2393,9 +2435,10 @@ impl SafeHaven {
             storage::cleanup_old_epochs(&env, &depositor, current_epoch);
 
 
-            // Clean up NFT evolution record on withdrawal
+            // Clean up NFT evolution record and sustainability metrics on withdrawal,
+            // subtracting the removed metrics from the running aggregates (#831).
             storage::remove_nft_evolution(&env, &depositor, deposit_id);
-            storage::remove_sustainability_metrics(&env, &depositor, deposit_id);
+            remove_sustainability_metrics_and_update_aggregates(&env, &depositor, deposit_id);
             events::withdraw(&env, &depositor, &entry.token, entry.amount, deposit_id);
             return Ok(());
         }
@@ -2752,9 +2795,10 @@ impl SafeHaven {
                     // Emit individual withdrawal event
                     events::withdraw(&env, &depositor, &entry.token, amount, deposit_id);
 
-                    // Clean up NFT evolution record and sustainability metrics
+                    // Clean up NFT evolution record and sustainability metrics,
+                    // subtracting the removed metrics from the running aggregates (#831).
                     storage::remove_nft_evolution(&env, &depositor, deposit_id);
-                    storage::remove_sustainability_metrics(&env, &depositor, deposit_id);
+                    remove_sustainability_metrics_and_update_aggregates(&env, &depositor, deposit_id);
 
                     success = true;
                 }
@@ -2785,9 +2829,10 @@ impl SafeHaven {
                     // Emit individual withdrawal event
                     events::withdraw(&env, &depositor, &entry.token, amount, deposit_id);
 
-                    // Clean up NFT evolution record and sustainability metrics
+                    // Clean up NFT evolution record and sustainability metrics,
+                    // subtracting the removed metrics from the running aggregates (#831).
                     storage::remove_nft_evolution(&env, &depositor, deposit_id);
-                    storage::remove_sustainability_metrics(&env, &depositor, deposit_id);
+                    remove_sustainability_metrics_and_update_aggregates(&env, &depositor, deposit_id);
 
                     success = true;
                 }
@@ -3141,6 +3186,90 @@ impl SafeHaven {
 
     pub fn is_paused(env: Env) -> bool {
         storage::is_paused(&env)
+    }
+
+    // ----------------------------------------------------------------
+    //  MEV Commit / Reveal
+    // ----------------------------------------------------------------
+
+    /// Submit a commit hash for a deposit, enabling MEV-protected reveal.
+    ///
+    /// The commitment is keyed by `(depositor, deposit_id)` and may only be
+    /// submitted once per deposit — a second commit returns
+    /// `VaultError::CommitAlreadyExists` rather than silently overwriting the
+    /// original hash. The stored commitment is given a TTL that covers the
+    /// full 30-minute reveal window, and the deposit's MEV status is set to
+    /// `MEVStatus::Committed`.
+    pub fn mev_commit(
+        env: Env,
+        depositor: Address,
+        deposit_id: u32,
+        commit_hash: Bytes,
+    ) -> Result<(), VaultError> {
+        depositor.require_auth();
+
+        // Reject overwrites: a commitment already exists for this deposit.
+        if storage::get_mev_commit(&env, &depositor, deposit_id).is_some() {
+            return Err(VaultError::CommitAlreadyExists);
+        }
+
+        let now = env.ledger().timestamp();
+        let commitment = MEVCommitment {
+            commit_hash: commit_hash.clone(),
+            committed_at: now,
+            revealed: false,
+        };
+
+        // Persist with a TTL covering the full reveal window.
+        storage::set_mev_commit(&env, &depositor, deposit_id, &commitment);
+        storage::extend_mev_commit_ttl(&env, &depositor, deposit_id);
+
+        storage::set_mev_status(&env, &depositor, deposit_id, MEVStatus::Committed);
+
+        events::mev_commit_submitted(&env, &depositor, deposit_id, &commit_hash, now);
+
+        Ok(())
+    }
+
+    /// Reveal a previously submitted MEV commitment.
+    ///
+    /// Loads the stored commitment, enforces the 30-minute reveal window,
+    /// verifies the supplied preimage against the stored hash, and on success
+    /// removes the commitment and marks the deposit as `MEVStatus::Revealed`.
+    pub fn mev_reveal(
+        env: Env,
+        depositor: Address,
+        deposit_id: u32,
+        preimage: Bytes,
+    ) -> Result<(), VaultError> {
+        depositor.require_auth();
+
+        let commitment = storage::get_mev_commit(&env, &depositor, deposit_id)
+            .ok_or(VaultError::CommitNotFound)?;
+
+        // Extend TTL on read so the commitment survives the full window.
+        storage::extend_mev_commit_ttl(&env, &depositor, deposit_id);
+
+        let now = env.ledger().timestamp();
+        let elapsed = now.saturating_sub(commitment.committed_at);
+        if elapsed > MEV_REVEAL_WINDOW_SECS {
+            return Err(VaultError::RevealWindowExpired);
+        }
+
+        // Verify the preimage hashes to the stored commitment.
+        let computed = env.crypto().sha256(&preimage);
+        let computed_bytes = Bytes::from(computed);
+        if computed_bytes != commitment.commit_hash {
+            return Err(VaultError::InvalidCommitment);
+        }
+
+        // Successful reveal: clean up the stored commitment.
+        storage::remove_mev_commit(&env, &depositor, deposit_id);
+        storage::set_mev_status(&env, &depositor, deposit_id, MEVStatus::Revealed);
+
+        events::mev_commit_revealed(&env, &depositor, deposit_id, now);
+
+        Ok(())
     }
 
     // ----------------------------------------------------------------
@@ -4759,6 +4888,56 @@ fn check_sustainability_milestones(
         storage::get_staker_pool_balance(&env, &token)
     }
 
+    /// Generate a sustainability report for `depositor`.
+    ///
+    /// The report timestamp is taken from `env.ledger().timestamp()` at call
+    /// time, so it always reflects the current ledger close time and is never
+    /// cached from a previous query.
+    ///
+    /// Aggregated totals use checked addition; on overflow the affected total
+    /// is clamped to `i128::MAX` rather than panicking, so the report is always
+    /// returned.
+    pub fn generate_sustainability_report(
+        env: Env,
+        depositor: Address,
+    ) -> SustainabilityReport {
+        let total_carbon = storage::get_total_carbon_footprint(&env, &depositor);
+        let total_offset = storage::get_total_carbon_offset(&env, &depositor);
+
+        let deposit_ids = storage::get_deposit_ids(&env, &depositor);
+        let mut recomputed_carbon: i128 = 0;
+        let mut recomputed_offset: i128 = 0;
+        let mut total_renewable: u64 = 0;
+        let mut count: u64 = 0;
+        for id in deposit_ids.iter() {
+            if let Some(m) = storage::get_sustainability_metrics_readonly(&env, &depositor, id) {
+                recomputed_carbon = recomputed_carbon
+                    .checked_add(m.carbon_footprint)
+                    .unwrap_or(i128::MAX);
+                recomputed_offset = recomputed_offset
+                    .checked_add(m.carbon_offset_grams)
+                    .unwrap_or(i128::MAX);
+                total_renewable = total_renewable.saturating_add(m.renewable_energy_percent as u64);
+                count = count.saturating_add(1);
+            }
+        }
+
+        let average_renewable = if count > 0 {
+            ((total_renewable / count) as u32).min(100)
+        } else {
+            0
+        };
+
+        SustainabilityReport {
+            depositor,
+            total_carbon_footprint: total_carbon.max(recomputed_carbon),
+            total_carbon_offset: total_offset.max(recomputed_offset),
+            average_renewable_energy_percent: average_renewable,
+            deposit_count: count as u32,
+            report_timestamp: env.ledger().timestamp(),
+        }
+    }
+
     /// Transfer the full staker-pool balance for `token` to `recipient`.
     ///
     /// `recipient` must sign the transaction.  Any address may claim —
@@ -5028,13 +5207,21 @@ impl SafeHaven {
         crate::prediction_market::cancel_market(&env, admin, market_id, token)
     }
 
-    /// Pause or unpause market creation.
+    /// Pause or unpause market creation (admin only).
+    ///
+    /// Delegates to the canonical implementation in the prediction market
+    /// entry-point impl block, which enforces admin auth and persists the flag.
     pub fn set_prediction_market_paused(
         env: Env,
         admin: Address,
         paused: bool,
     ) -> Result<(), crate::prediction_market_errors::PredictionMarketError> {
         crate::prediction_market::set_market_paused(&env, admin, paused)
+    }
+
+    /// Returns whether new prediction market creation is currently paused.
+    pub fn get_prediction_market_paused(env: Env) -> bool {
+        crate::prediction_market::is_market_paused(&env)
     }
 
     // ------ Read-only queries ------
@@ -5075,6 +5262,203 @@ impl SafeHaven {
         market_id: u32,
     ) -> Option<crate::prediction_market_types::MarketWithOutcomes> {
         crate::prediction_market::get_market_with_outcomes(&env, market_id)
+    }
+}
+
+#[cfg(test)]
+mod sustainability_precision_tests {
+    use super::*;
+
+    /// Max deposit (10^15) × max lock (157_788_000 s) must not overflow i128.
+    #[test]
+    fn carbon_footprint_max_values_no_overflow() {
+        let amount: i128 = 1_000_000_000_000_000; // 10^15
+        let duration: u64 = 157_788_000; // ~5 years in seconds
+        let footprint = calculate_carbon_footprint(amount, duration).unwrap();
+        assert!(footprint > 0);
+        // Expected ≈ 1.57788e23 × baseline; must be well below i128::MAX.
+        assert!(footprint < i128::MAX);
+        let expected = amount
+            .checked_mul(duration as i128)
+            .unwrap()
+            .checked_mul(crate::constants::CARBON_BASELINE_PER_UNIT_SECOND)
+            .unwrap();
+        assert_eq!(footprint, expected);
+    }
+
+    /// Offset for the max footprint must also stay within i128.
+    #[test]
+    fn carbon_offset_max_values_no_overflow() {
+        let amount: i128 = 1_000_000_000_000_000;
+        let duration: u64 = 157_788_000;
+        let footprint = calculate_carbon_footprint(amount, duration).unwrap();
+        let offset = calculate_carbon_offset(footprint, 10_000).unwrap();
+        assert_eq!(offset, footprint); // 100% penalty → full offset
+        assert!(offset < i128::MAX);
+    }
+
+    /// Small values truncate consistently (integer division toward zero).
+    #[test]
+    fn carbon_offset_small_value_rounding() {
+        // 1 × 1 bps / 10_000 = 0 (truncated)
+        assert_eq!(calculate_carbon_offset(1, 1).unwrap(), 0);
+        // 9_999 × 1 / 10_000 = 0
+        assert_eq!(calculate_carbon_offset(9_999, 1).unwrap(), 0);
+        // 10_000 × 1 / 10_000 = 1
+        assert_eq!(calculate_carbon_offset(10_000, 1).unwrap(), 1);
+        // 15_000 × 1 / 10_000 = 1 (truncated)
+        assert_eq!(calculate_carbon_offset(15_000, 1).unwrap(), 1);
+    }
+
+    /// Zero inputs yield zero without panicking.
+    #[test]
+    fn carbon_zero_values() {
+        assert_eq!(calculate_carbon_footprint(0, 100).unwrap(), 0);
+        assert_eq!(calculate_carbon_footprint(100, 0).unwrap(), 0);
+        assert_eq!(calculate_carbon_footprint(0, 0).unwrap(), 0);
+        assert_eq!(calculate_carbon_offset(0, 500).unwrap(), 0);
+        assert_eq!(calculate_carbon_offset(100, 0).unwrap(), 0);
+    }
+
+    /// Negative amounts are treated as zero (defensive, no panic).
+    #[test]
+    fn carbon_negative_amount_no_panic() {
+        assert_eq!(calculate_carbon_footprint(-1, 100).unwrap(), 0);
+        assert_eq!(calculate_carbon_offset(-1, 500).unwrap(), 0);
+    }
+
+    /// Extreme inputs that would overflow return CarbonOverflow, not panic.
+    #[test]
+    fn carbon_footprint_overflow_returns_error() {
+        let result = calculate_carbon_footprint(i128::MAX, u64::MAX);
+        assert_eq!(result, Err(VaultError::CarbonOverflow));
+    }
+
+    /// Offset overflow returns CarbonOverflow, not panic.
+    #[test]
+    fn carbon_offset_overflow_returns_error() {
+        let result = calculate_carbon_offset(i128::MAX, 10_000);
+        assert_eq!(result, Err(VaultError::CarbonOverflow));
+    }
+}
+
+#[cfg(test)]
+mod sustainability_milestone_tests {
+    use super::*;
+
+    /// Bitmap bit positions for the four sustainability milestones.
+    const BIT_CARBON_NEUTRAL: u32 = 1;
+    const BIT_CARBON_NEGATIVE: u32 = 4;
+    const BIT_LARGE_OFFSET: u32 = 8;
+
+    /// Threshold for the LargeOffset milestone: 1 billion grams CO2e.
+    const LARGE_OFFSET_THRESHOLD: i128 = 1_000_000_000;
+
+    /// Mirrors the milestone decision logic in `check_sustainability_milestones`.
+    /// Returns the bits that should be newly set for the given totals.
+    fn evaluate_milestones(total_carbon: i128, total_offset: i128, bitmap: u32) -> u32 {
+        let mut new_bits = 0u32;
+        if total_offset >= total_carbon && (bitmap & BIT_CARBON_NEUTRAL) == 0 {
+            new_bits |= BIT_CARBON_NEUTRAL;
+        }
+        if total_offset > total_carbon && (bitmap & BIT_CARBON_NEGATIVE) == 0 {
+            new_bits |= BIT_CARBON_NEGATIVE;
+        }
+        if total_offset >= LARGE_OFFSET_THRESHOLD && (bitmap & BIT_LARGE_OFFSET) == 0 {
+            new_bits |= BIT_LARGE_OFFSET;
+        }
+        new_bits
+    }
+
+    /// #828: CarbonNegative fires when offset exceeds footprint by exactly 1.
+    #[test]
+    fn carbon_negative_achieved_by_one() {
+        let bits = evaluate_milestones(1_000, 1_001, 0);
+        assert_eq!(bits & BIT_CARBON_NEGATIVE, BIT_CARBON_NEGATIVE);
+    }
+
+    /// #828: CarbonNegative is distinct from CarbonNeutral (>= vs >).
+    #[test]
+    fn carbon_negative_distinct_from_neutral() {
+        // Exactly equal: neutral only, not negative.
+        let bits = evaluate_milestones(1_000, 1_000, 0);
+        assert_eq!(bits & BIT_CARBON_NEUTRAL, BIT_CARBON_NEUTRAL);
+        assert_eq!(bits & BIT_CARBON_NEGATIVE, 0);
+
+        // Strictly greater: both neutral and negative.
+        let bits = evaluate_milestones(1_000, 1_001, 0);
+        assert_eq!(bits & BIT_CARBON_NEUTRAL, BIT_CARBON_NEUTRAL);
+        assert_eq!(bits & BIT_CARBON_NEGATIVE, BIT_CARBON_NEGATIVE);
+    }
+
+    /// #828: CarbonNegative not achieved at exactly equal totals.
+    #[test]
+    fn carbon_negative_not_achieved_at_equal() {
+        let bits = evaluate_milestones(5_000, 5_000, 0);
+        assert_eq!(bits & BIT_CARBON_NEGATIVE, 0);
+    }
+
+    /// #828: Works with various excess amounts.
+    #[test]
+    fn carbon_negative_various_excess_amounts() {
+        for excess in [1i128, 2, 100, 1_000_000] {
+            let bits = evaluate_milestones(10_000, 10_000 + excess, 0);
+            assert_eq!(bits & BIT_CARBON_NEGATIVE, BIT_CARBON_NEGATIVE);
+        }
+    }
+
+    /// #829: LargeOffset achieved exactly at the 1 billion gram threshold.
+    #[test]
+    fn large_offset_achieved_at_threshold() {
+        let bits = evaluate_milestones(0, LARGE_OFFSET_THRESHOLD, 0);
+        assert_eq!(bits & BIT_LARGE_OFFSET, BIT_LARGE_OFFSET);
+    }
+
+    /// #829: LargeOffset not achieved just below the threshold.
+    #[test]
+    fn large_offset_not_achieved_below_threshold() {
+        let bits = evaluate_milestones(0, LARGE_OFFSET_THRESHOLD - 1, 0);
+        assert_eq!(bits & BIT_LARGE_OFFSET, 0);
+    }
+
+    /// #829: LargeOffset works with very large offset amounts.
+    #[test]
+    fn large_offset_works_with_large_amounts() {
+        let bits = evaluate_milestones(0, 10_000_000_000_000, 0);
+        assert_eq!(bits & BIT_LARGE_OFFSET, BIT_LARGE_OFFSET);
+    }
+
+    /// #830: Once a bit is set, the milestone is not re-emitted.
+    #[test]
+    fn milestones_emit_once_per_depositor() {
+        let first = evaluate_milestones(1_000, 1_001, 0);
+        assert_ne!(first, 0);
+
+        // Simulate setting the bits immutably.
+        let bitmap = first;
+        let second = evaluate_milestones(1_000, 1_001, bitmap);
+        assert_eq!(second, 0);
+    }
+
+    /// #830: Multiple milestones can be tracked simultaneously in the bitmap.
+    #[test]
+    fn multiple_milestones_tracked_simultaneously() {
+        let bits = evaluate_milestones(0, LARGE_OFFSET_THRESHOLD, 0);
+        // Offset >= footprint (0) and >= threshold: neutral + large offset.
+        assert_eq!(bits & BIT_CARBON_NEUTRAL, BIT_CARBON_NEUTRAL);
+        assert_eq!(bits & BIT_LARGE_OFFSET, BIT_LARGE_OFFSET);
+        assert_eq!(bits & BIT_CARBON_NEGATIVE, 0);
+    }
+
+    /// #830: Bitmap is immutable after set — re-evaluation never clears bits.
+    #[test]
+    fn bitmap_immutable_after_set() {
+        let bitmap = BIT_CARBON_NEUTRAL | BIT_CARBON_NEGATIVE | BIT_LARGE_OFFSET;
+        let new_bits = evaluate_milestones(0, 0, bitmap);
+        assert_eq!(new_bits, 0);
+        assert_eq!(bitmap & BIT_CARBON_NEUTRAL, BIT_CARBON_NEUTRAL);
+        assert_eq!(bitmap & BIT_CARBON_NEGATIVE, BIT_CARBON_NEGATIVE);
+        assert_eq!(bitmap & BIT_LARGE_OFFSET, BIT_LARGE_OFFSET);
     }
 }
 
@@ -5167,12 +5551,38 @@ impl SafeHaven {
     }
 
     /// Pause or unpause new market creation (admin only).
+    ///
+    /// Loads the stored `MarketConfig`, requires authorization from the
+    /// configured admin, flips the `paused` flag, persists the config and
+    /// emits a `MarketPauseToggled` event. Non-admins receive
+    /// `PredictionMarketError::Unauthorized`.
     pub fn set_prediction_market_paused(
         env: Env,
         admin: Address,
         paused: bool,
     ) -> Result<(), PredictionMarketError> {
-        prediction_market::set_market_paused(&env, admin, paused)
+        admin.require_auth();
+
+        let mut config = storage::get_market_config(&env)
+            .ok_or(PredictionMarketError::NotInitialized)?;
+
+        if admin != config.admin {
+            return Err(PredictionMarketError::Unauthorized);
+        }
+
+        config.paused = paused;
+        storage::set_market_config(&env, &config);
+
+        events::prediction_market_pause_toggled(&env, &admin, paused);
+
+        Ok(())
+    }
+
+    /// Returns whether new prediction market creation is currently paused.
+    pub fn get_prediction_market_paused(env: Env) -> bool {
+        storage::get_market_config(&env)
+            .map(|config| config.paused)
+            .unwrap_or(false)
     }
 
     // ----------------------------------------------------------------

@@ -40,6 +40,13 @@ pub fn get_deposit(env: &Env, id: u64) -> Option<Deposit> {
 }
 
 /// Remove a deposit entry.
+///
+/// This is the single cleanup path for deposit lifecycle termination
+/// (withdrawal or cancellation). Callers must invoke this whenever a deposit
+/// leaves the active set so that no stale entries remain for aggregate
+/// reporting. Sustainability metrics tied to the deposit are removed by the
+/// caller alongside this call (see issue #831); no additional storage keys
+/// are required here.
 pub fn remove_deposit(env: &Env, id: u64) {
     let key = DataKey::Deposit(id);
     env.storage().persistent().remove(&key);

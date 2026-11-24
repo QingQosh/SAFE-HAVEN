@@ -44,6 +44,7 @@ pub enum PredictionMarketError {
     InvalidAdmin = 1024,
     
     // Market operation errors
+    /// Market creation is paused by the admin.
     MarketPaused = 1025,
     InvalidMarketType = 1026,
     InvalidOracle = 1027,
@@ -55,4 +56,8 @@ pub enum PredictionMarketError {
 
     /// `init_prediction_markets` was called on an already-initialized subsystem.
     AlreadyInitialized = 1031,
+
+    /// The market's close time is not sufficiently in the future
+    /// (must be > now + MIN_MARKET_DURATION_SECS).
+    CloseTimeTooSoon = 1032,
 }

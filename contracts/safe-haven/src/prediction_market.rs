@@ -13,12 +13,24 @@ use crate::prediction_market_types::*;
 //  Market Initialization
 // ================================================================
 
-/// Initialize the prediction market subsystem
-pub fn initialize_markets(
+/// Default fee applied when `init_prediction_markets` is called without an
+/// explicit fee (100 basis points = 1%).
+pub const DEFAULT_FEE_BPS: u32 = 100;
+
+/// Initialize the prediction market subsystem.
+///
+/// This is a one-time setup entry point. It:
+/// - requires authorization from `admin`,
+/// - returns `AlreadyInitialized` if the subsystem was already set up,
+/// - defaults `fee_bps` to [`DEFAULT_FEE_BPS`] (100 = 1%) when `None`,
+/// - validates that the fee does not exceed [`MAX_FEE_BPS`],
+/// - persists the resulting [`MarketConfig`] and marks the subsystem as
+///   initialized.
+pub fn init_prediction_markets(
     env: &Env,
     admin: Address,
     fee_recipient: Address,
-    default_fee_bps: u32,
+    fee_bps: Option<u32>,
 ) -> Result<(), PredictionMarketError> {
     admin.require_auth();
 
@@ -26,6 +38,9 @@ pub fn initialize_markets(
     if storage::is_pm_initialized(env) {
         return Err(PredictionMarketError::AlreadyInitialized);
     }
+
+    // Resolve the fee, defaulting to 1% when not supplied
+    let default_fee_bps = fee_bps.unwrap_or(DEFAULT_FEE_BPS);
 
     // Validate fee
     if default_fee_bps > MAX_FEE_BPS {
@@ -46,6 +61,19 @@ pub fn initialize_markets(
     Ok(())
 }
 
+/// Initialize the prediction market subsystem with an explicit fee.
+///
+/// Thin wrapper around [`init_prediction_markets`] kept for callers that
+/// already pass a concrete fee value.
+pub fn initialize_markets(
+    env: &Env,
+    admin: Address,
+    fee_recipient: Address,
+    default_fee_bps: u32,
+) -> Result<(), PredictionMarketError> {
+    init_prediction_markets(env, admin, fee_recipient, Some(default_fee_bps))
+}
+
 // ================================================================
 //  Market Creation
 // ================================================================
@@ -64,9 +92,13 @@ pub fn create_market(
 ) -> Result<u32, PredictionMarketError> {
     creator.require_auth();
 
+    // Load config from persistent storage so the pause flag survives across
+    // invocations. `initialize_markets` seeds `paused: false`.
     let config = storage::get_market_config(env)
         .ok_or(PredictionMarketError::InternalError)?;
 
+    // Pause enforcement: reject new market creation before any timing
+    // validation or state writes occur.
     if config.paused {
         return Err(PredictionMarketError::MarketPaused);
     }
@@ -115,6 +147,7 @@ pub fn create_market(
         market_id,
         market_type: market_type.clone(),
         description,
+        creator: creator.clone(),
         oracle: oracle.clone(),
         close_time,
         resolution_deadline,
@@ -174,7 +207,7 @@ pub fn place_bet(
     let mut market = storage::get_market(env, market_id)
         .ok_or(PredictionMarketError::MarketNotFound)?;
 
-    // Check market is open
+    // Check market is open (bets are rejected once the market is Closed/Resolved/Cancelled)
     if market.status != MarketStatus::Open {
         return Err(PredictionMarketError::MarketNotOpen);
     }
@@ -247,17 +280,15 @@ pub fn close_market(env: &Env, closer: Address, market_id: u32) -> Result<(), Pr
     let config = storage::get_market_config(env)
         .ok_or(PredictionMarketError::InternalError)?;
 
-    // Only admin or oracle can close
-    if closer != config.admin && closer != storage::get_market_readonly(env, market_id)
-        .ok_or(PredictionMarketError::MarketNotFound)?
-        .oracle
-    {
-        return Err(PredictionMarketError::Unauthorized);
-    }
-
     let mut market = storage::get_market(env, market_id)
         .ok_or(PredictionMarketError::MarketNotFound)?;
 
+    // Only creator, admin or oracle can close
+    if closer != market.creator && closer != config.admin && closer != market.oracle {
+        return Err(PredictionMarketError::Unauthorized);
+    }
+
+    // Idempotent close: a second close (or closing a non-Open market) is rejected
     if market.status != MarketStatus::Open {
         return Err(PredictionMarketError::InvalidMarketStatus);
     }
@@ -510,8 +541,17 @@ pub fn get_market_details(env: &Env, market_id: u32) -> Option<PredictionMarket>
     storage::get_market_readonly(env, market_id)
 }
 
-/// Get outcome details
+/// Get outcome details (Issue #96).
+///
+/// Returns the stored `MarketOutcome` for the given `(market_id, outcome_id)`,
+/// which includes `outcome_id`, `name`, `total_bet_amount` and `bettor_count`.
+/// Returns `None` if the market or the outcome does not exist.
 pub fn get_outcome_details(env: &Env, market_id: u32, outcome_id: u32) -> Option<MarketOutcome> {
+    // Ensure the market exists so we never return a stale/orphaned outcome.
+    let market = storage::get_market_readonly(env, market_id)?;
+    if outcome_id >= market.outcome_count {
+        return None;
+    }
     storage::get_outcome_readonly(env, market_id, outcome_id)
 }
 
@@ -540,6 +580,8 @@ pub fn get_market_with_outcomes(env: &Env, market_id: u32) -> Option<MarketWithO
     let market = storage::get_market_readonly(env, market_id)?;
     let outcomes = storage::get_market_outcomes(env, market_id, market.outcome_count);
     Some(MarketWithOutcomes { market, outcomes })
+}
+
 // Helper for readonly outcome access
 fn get_outcome_readonly(env: &Env, market_id: u32, outcome_id: u32) -> Option<MarketOutcome> {
     let key = soroban_sdk::Symbol::new(env, &format!("pmo_{}_{}", market_id, outcome_id));
