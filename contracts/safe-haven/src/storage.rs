@@ -1468,6 +1468,37 @@ pub fn record_faucet_request(env: &Env, account: &Address, asset: &FaucetAsset, 
 //  Sustainability metrics helpers
 // ----------------------------------------------------------------
 
+/// Baseline carbon intensity: grams of CO2e emitted per unit of deposit
+/// amount per second of lock duration.
+///
+/// The carbon footprint of a deposit is computed as:
+/// `carbon_footprint = amount × duration_seconds × CARBON_BASELINE_PER_UNIT_SECOND`
+///
+/// The default baseline is 1 gram CO2e per unit per second. For example,
+/// 1000 units locked for 86,400 seconds (1 day) yields 86,400,000 grams CO2e.
+///
+/// This is a compile-time constant and is intentionally not configurable
+/// (no per-token baselines, no dynamic adjustment).
+pub const CARBON_BASELINE_PER_UNIT_SECOND: i128 = 1;
+
+/// Compute the carbon footprint for a deposit using checked arithmetic.
+///
+/// Returns `Err(VaultError::Overflow)` instead of panicking if the
+/// intermediate or final product exceeds the `i128` range. With the
+/// maximum deposit amount (10^15) and the maximum lock duration
+/// (5 years ≈ 157,680,000 seconds) the product is ≈ 1.58 × 10^23, which
+/// fits comfortably within `i128` (max ≈ 1.7 × 10^38).
+pub fn compute_carbon_footprint(
+    amount: i128,
+    duration_seconds: u64,
+) -> Result<i128, crate::errors::VaultError> {
+    let duration = i128::from(duration_seconds);
+    amount
+        .checked_mul(duration)
+        .and_then(|v| v.checked_mul(CARBON_BASELINE_PER_UNIT_SECOND))
+        .ok_or(crate::errors::VaultError::Overflow)
+}
+
 /// Store sustainability metrics for a specific deposit.
 pub fn set_sustainability_metrics(
     env: &Env,

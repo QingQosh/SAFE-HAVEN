@@ -537,8 +537,17 @@ pub fn get_market_details(env: &Env, market_id: u32) -> Option<PredictionMarket>
     storage::get_market_readonly(env, market_id)
 }
 
-/// Get outcome details
+/// Get outcome details (Issue #96).
+///
+/// Returns the stored `MarketOutcome` for the given `(market_id, outcome_id)`,
+/// which includes `outcome_id`, `name`, `total_bet_amount` and `bettor_count`.
+/// Returns `None` if the market or the outcome does not exist.
 pub fn get_outcome_details(env: &Env, market_id: u32, outcome_id: u32) -> Option<MarketOutcome> {
+    // Ensure the market exists so we never return a stale/orphaned outcome.
+    let market = storage::get_market_readonly(env, market_id)?;
+    if outcome_id >= market.outcome_count {
+        return None;
+    }
     storage::get_outcome_readonly(env, market_id, outcome_id)
 }
 

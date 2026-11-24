@@ -1822,9 +1822,14 @@ impl SafeHaven {
     // ----------------------------------------------------------------
 
     /// Register a staker with a stake amount. Updates their stake if already registered.
+    ///
+    /// The stake amount must be strictly positive. Validation happens before any
+    /// state mutation (staker entry, staker list, total staked, registration
+    /// timestamp, events), so a rejected call leaves storage untouched.
     pub fn register_staker(env: Env, staker: Address, amount: i128) -> Result<(), VaultError> {
         staker.require_auth();
 
+        // Amount validation must precede every storage write / event emission.
         if amount <= 0 {
             return Err(VaultError::InvalidStakeAmount);
         }

@@ -83,5 +83,18 @@ pub const MEV_PRICE_DEVIATION_THRESHOLD_BPS: u32 = 200;
 /// Baseline renewable energy percentage for deposits (default 50%)
 pub const RENEWABLE_ENERGY_BASELINE: u32 = 50;
 
-/// Carbon baseline: grams CO2e per unit per second (1 gram per unit-second)
+/// Carbon baseline: grams CO2e per unit per second (1 gram per unit-second).
+///
+/// This is the baseline coefficient used by the deposit carbon footprint
+/// formula:
+///
+/// ```text
+/// carbon_footprint = amount × duration_seconds × CARBON_BASELINE_PER_UNIT_SECOND
+/// ```
+///
+/// With the default value of `1`, a deposit of 1000 units locked for 86400
+/// seconds (1 day) yields 86,400,000 grams CO2e.  The maximum deposit
+/// (`MAX_DEPOSIT_AMOUNT` = 10^15) locked for the maximum duration
+/// (`MAX_LOCK_DURATION_SECS` = 157,788,000 s) yields
+/// 1.57788 × 10^23 grams CO2e, which fits comfortably within `i128`.
 pub const CARBON_BASELINE_PER_UNIT_SECOND: i128 = 1;

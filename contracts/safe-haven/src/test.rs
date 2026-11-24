@@ -5336,6 +5336,68 @@ fn test_register_staker_negative_amount_fails() {
 }
 
 #[test]
+fn test_register_staker_amount_one_succeeds_and_persists() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+
+    let timestamp_before = env.ledger().timestamp();
+    let result = vault.register_staker(&alice, &1);
+    assert_eq!(result, Ok(()));
+
+    assert_eq!(crate::storage::get_staker(&env, &alice), Some(1));
+    assert_eq!(crate::storage::get_total_staked(&env), 1);
+    assert_eq!(
+        crate::storage::get_stakers_list(&env),
+        soroban_sdk::Vec::from_array(&env, [alice.clone()])
+    );
+    assert_eq!(
+        crate::storage::get_staker_registration_timestamp(&env, &alice),
+        Some(timestamp_before)
+    );
+}
+
+#[test]
+fn test_register_staker_zero_amount_does_not_mutate_state() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+
+    let staker_before = crate::storage::get_staker(&env, &alice);
+    let total_staked_before = crate::storage::get_total_staked(&env);
+    let stakers_before = crate::storage::get_stakers_list(&env);
+    let timestamp_before = crate::storage::get_staker_registration_timestamp(&env, &alice);
+
+    let result = vault.try_register_staker(&alice, &0);
+    assert_eq!(result, Err(Ok(VaultError::InvalidStakeAmount)));
+
+    assert_eq!(crate::storage::get_staker(&env, &alice), staker_before);
+    assert_eq!(crate::storage::get_total_staked(&env), total_staked_before);
+    assert_eq!(crate::storage::get_stakers_list(&env), stakers_before);
+    assert_eq!(
+        crate::storage::get_staker_registration_timestamp(&env, &alice),
+        timestamp_before
+    );
+}
+
+#[test]
+fn test_register_staker_negative_amount_does_not_mutate_state() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+
+    let staker_before = crate::storage::get_staker(&env, &alice);
+    let total_staked_before = crate::storage::get_total_staked(&env);
+    let stakers_before = crate::storage::get_stakers_list(&env);
+    let timestamp_before = crate::storage::get_staker_registration_timestamp(&env, &alice);
+
+    let result = vault.try_register_staker(&alice, &-1000);
+    assert_eq!(result, Err(Ok(VaultError::InvalidStakeAmount)));
+
+    assert_eq!(crate::storage::get_staker(&env, &alice), staker_before);
+    assert_eq!(crate::storage::get_total_staked(&env), total_staked_before);
+    assert_eq!(crate::storage::get_stakers_list(&env), stakers_before);
+    assert_eq!(
+        crate::storage::get_staker_registration_timestamp(&env, &alice),
+        timestamp_before
+    );
+}
+
+#[test]
 fn test_register_staker_updates_existing_stake() {
     let (env, vault, _token, _admin, alice, _fee) = setup();
 
@@ -9471,6 +9533,124 @@ fn test_renewable_energy_persistence_across_operations() {
             .expect("metrics should exist");
         assert_eq!(metrics.renewable_energy_percent, custom_renewable);
     }
+}
+
+// ================================================================
+//  Carbon Footprint Formula Tests (Issue #66)
+// ================================================================
+
+/// Expected carbon footprint using the documented formula:
+/// `amount × duration_seconds × CARBON_BASELINE_PER_UNIT_SECOND`.
+fn expected_carbon_footprint(amount: i128, duration_secs: u64) -> i128 {
+    let baseline = crate::constants::CARBON_BASELINE_PER_UNIT_SECOND;
+    assert_eq!(baseline, 1, "default baseline must be 1 gram CO2e per unit per second");
+    (amount as u128)
+        .checked_mul(duration_secs as u128)
+        .and_then(|v| v.checked_mul(baseline as u128))
+        .expect("carbon footprint must not overflow u128")
+        .try_into()
+        .expect("carbon footprint must fit in i128")
+}
+
+#[test]
+fn test_carbon_footprint_formula_one_day() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &1_000);
+
+    let amount: i128 = 1_000;
+    let duration_secs: u64 = 86_400; // 1 day
+    let unlock_time = env.ledger().timestamp() + duration_secs;
+
+    let deposit_id = vault
+        .deposit(&alice, &token, &amount, &unlock_time, &0)
+        .expect("deposit should succeed");
+
+    let metrics = vault
+        .get_sustainability_metrics(&alice, &deposit_id)
+        .expect("metrics should exist");
+
+    assert_eq!(metrics.carbon_footprint, 86_400_000);
+    assert_eq!(
+        metrics.carbon_footprint,
+        expected_carbon_footprint(amount, duration_secs)
+    );
+}
+
+#[test]
+fn test_carbon_footprint_formula_various_inputs() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &1_000_000);
+
+    let cases: [(i128, u64); 4] = [
+        (1, 1),
+        (100, 3_600),
+        (5_000, 86_400),
+        (10_000, 604_800),
+    ];
+
+    for (amount, duration_secs) in cases {
+        let unlock_time = env.ledger().timestamp() + duration_secs;
+        let deposit_id = vault
+            .deposit(&alice, &token, &amount, &unlock_time, &0)
+            .expect("deposit should succeed");
+
+        let metrics = vault
+            .get_sustainability_metrics(&alice, &deposit_id)
+            .expect("metrics should exist");
+
+        let expected = expected_carbon_footprint(amount, duration_secs);
+        assert_eq!(
+            metrics.carbon_footprint, expected,
+            "carbon footprint mismatch for amount={} duration={}",
+            amount, duration_secs
+        );
+    }
+}
+
+#[test]
+fn test_carbon_footprint_max_values_no_overflow() {
+    let amount: i128 = 1_000_000_000_000_000; // 10^15
+    let duration_secs: u64 = MAX_LOCK_DURATION_SECS;
+
+    assert_eq!(amount, MAX_DEPOSIT_AMOUNT);
+    assert_eq!(duration_secs, 157_788_000);
+
+    // Compute with u128 to prove no overflow at the chosen integer width.
+    let product = (amount as u128)
+        .checked_mul(duration_secs as u128)
+        .and_then(|v| v.checked_mul(crate::constants::CARBON_BASELINE_PER_UNIT_SECOND as u128))
+        .expect("max deposit × max lock must not overflow u128");
+
+    assert_eq!(product, 157_788_000_000_000_000_000_000);
+    assert!(product <= i128::MAX as u128, "product must fit in i128");
+
+    // Also verify the checked i128 path yields the same value.
+    let product_i128 = amount
+        .checked_mul(duration_secs as i128)
+        .expect("max deposit × max lock must not overflow i128");
+    assert_eq!(product_i128 as u128, product);
+}
+
+#[test]
+fn test_carbon_footprint_stored_with_deposit_matches_formula() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &10_000);
+
+    let amount: i128 = 2_500;
+    let duration_secs: u64 = 7_200;
+    let unlock_time = env.ledger().timestamp() + duration_secs;
+
+    let deposit_id = vault
+        .deposit(&alice, &token, &amount, &unlock_time, &0)
+        .expect("deposit should succeed");
+
+    let metrics = vault
+        .get_sustainability_metrics(&alice, &deposit_id)
+        .expect("metrics should exist");
+
+    let expected = expected_carbon_footprint(amount, duration_secs);
+    assert_eq!(metrics.carbon_footprint, expected);
+    assert_eq!(metrics.carbon_footprint, 18_000_000);
 }
 
 #[test]
