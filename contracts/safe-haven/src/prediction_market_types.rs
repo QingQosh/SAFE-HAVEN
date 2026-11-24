@@ -165,6 +165,14 @@ pub const MAX_FEE_BPS: u32 = 1000; // 10% max fee
 /// `MarketOutcome` values. Outcomes are listed by ascending `outcome_id`
 /// (0, 1, 2 … up to `market.outcome_count - 1`), matching the order in
 /// which they were supplied when the market was created.
+///
+/// This type is also the response for `get_prediction_market` (Issue #95):
+/// the embedded `PredictionMarket` carries every market field (market_id,
+/// market_type, description, oracle, close_time, resolution_deadline,
+/// status, winning_outcome, total_pool, bettor_count, outcome_count,
+/// created_at, resolution_data, fee_bps) and `outcomes` supplies the
+/// ordered outcome list, so the query returns complete market data for
+/// every market state (Open, Closed, Resolved, Cancelled).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketWithOutcomes {

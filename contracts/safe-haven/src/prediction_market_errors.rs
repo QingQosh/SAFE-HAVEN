@@ -44,6 +44,7 @@ pub enum PredictionMarketError {
     InvalidAdmin = 1024,
     
     // Market operation errors
+    /// Market creation is paused by the admin.
     MarketPaused = 1025,
     InvalidMarketType = 1026,
     InvalidOracle = 1027,

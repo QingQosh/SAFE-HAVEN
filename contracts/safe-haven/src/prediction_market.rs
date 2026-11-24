@@ -92,9 +92,13 @@ pub fn create_market(
 ) -> Result<u32, PredictionMarketError> {
     creator.require_auth();
 
+    // Load config from persistent storage so the pause flag survives across
+    // invocations. `initialize_markets` seeds `paused: false`.
     let config = storage::get_market_config(env)
         .ok_or(PredictionMarketError::InternalError)?;
 
+    // Pause enforcement: reject new market creation before any timing
+    // validation or state writes occur.
     if config.paused {
         return Err(PredictionMarketError::MarketPaused);
     }

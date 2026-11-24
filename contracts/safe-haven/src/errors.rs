@@ -66,4 +66,6 @@ pub enum VaultError {
     /// Carbon footprint arithmetic would overflow i128 (issue #77).
     /// Returned by the checked carbon calculation helpers.
     CarbonOverflow = 37,
+    /// Contract has not been initialized yet (issue #16).
+    NotInitialized = 38,
 }

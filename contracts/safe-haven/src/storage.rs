@@ -1,11 +1,10 @@
 use soroban_sdk::{token, Address, Bytes, Env, Vec};
 
-use crate::types::{VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS};
-use soroban_sdk::{Env, Bytes};
-use crate::types::{DepositSubscription, MultiTokenVaultEntry, SubscriptionExecution, SubscriptionStats, TaxLossHarvest, VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS, SustainabilityMetrics};
-use crate::types::{MultiTokenVaultEntry, VaultEntry, VaultKey, LedgerVaultEntry, SessionKeyEntry, MAX_LOCK_DURATION_SECS};
-use crate::types::{DepositSubscription, MultiTokenVaultEntry, SubscriptionExecution, SubscriptionStats, TaxLossHarvest, VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS};
-use crate::types::CircuitBreakerActivation;
+use crate::types::{
+    CircuitBreakerActivation, DepositSubscription, LedgerVaultEntry, MultiTokenVaultEntry,
+    SessionKeyEntry, SubscriptionExecution, SubscriptionStats, SustainabilityMetrics,
+    TaxLossHarvest, VaultEntry, VaultKey, MAX_LOCK_DURATION_SECS,
+};
 
 // ================================================================
 // LEDGER_SECONDS: Average time between Stellar ledger closes
@@ -441,6 +440,9 @@ pub fn remove_pending_admin(env: &Env) {
 //  Initialized flag
 // ----------------------------------------------------------------
 
+/// Mark the contract as initialized. Must be called in the same invocation
+/// as the rest of the initial state (admin, fee_recipient, etc.) so that
+/// the whole setup is atomic — if any step traps, nothing is persisted.
 pub fn set_initialized(env: &Env) {
     env.storage()
         .persistent()
@@ -450,11 +452,23 @@ pub fn set_initialized(env: &Env) {
         .extend_ttl(&VaultKey::Initialized, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
+/// Returns `true` once `initialize()` has completed successfully.
 pub fn is_initialized(env: &Env) -> bool {
     env.storage()
         .persistent()
         .get::<VaultKey, bool>(&VaultKey::Initialized)
         .unwrap_or(false)
+}
+
+/// Guard used at the top of `initialize()`. Returns
+/// `Err(VaultError::AlreadyInitialized)` if the flag is already set, so a
+/// second call cannot replace the admin or fee recipient.
+pub fn require_not_initialized(env: &Env) -> Result<(), crate::errors::VaultError> {
+    if is_initialized(env) {
+        Err(crate::errors::VaultError::AlreadyInitialized)
+    } else {
+        Ok(())
+    }
 }
 
 // ----------------------------------------------------------------
@@ -1804,35 +1818,66 @@ pub fn drain_staker_pool(env: &Env, token: &Address) -> i128 {
 //  MEV Protection: Commit-Reveal Scheme
 // ----------------------------------------------------------------
 
+/// Number of ledgers that cover the MEV commit reveal window
+/// (`MEV_COMMIT_WINDOW_SECS`, 30 minutes), rounded up.
+pub const MEV_COMMIT_TTL_LEDGERS: u32 =
+    ((crate::types::MEV_COMMIT_WINDOW_SECS + LEDGER_SECONDS - 1) / LEDGER_SECONDS) as u32;
+/// Refresh threshold for the commit TTL — bump when half the window remains.
+pub const MEV_COMMIT_TTL_THRESHOLD: u32 = MEV_COMMIT_TTL_LEDGERS / 2;
+
 /// Store a commit hash for a (depositor, deposit_id) pair.
-/// The commit is stored with a TTL window of MEV_COMMIT_WINDOW_SECS (30 minutes)
-/// to allow time for the reveal phase.
-pub fn set_mev_commit(env: &Env, depositor: &Address, deposit_id: u32, commit: &Bytes) {
-    use crate::types::MEV_COMMIT_WINDOW_SECS;
-    
+///
+/// The commit is keyed by `VaultKey::MevCommit(depositor, deposit_id)` in
+/// persistent storage and its TTL is extended to cover the full
+/// `MEV_COMMIT_WINDOW_SECS` (30 minute) reveal window.
+///
+/// A commit cannot be overwritten: if one already exists for this pair the
+/// call returns `Err(VaultError::CommitAlreadyExists)` and leaves the stored
+/// value untouched.
+pub fn set_mev_commit(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+    commit: &Bytes,
+) -> Result<(), crate::errors::VaultError> {
     let key = VaultKey::MevCommit(depositor.clone(), deposit_id);
+
+    if env.storage().persistent().has(&key) {
+        return Err(crate::errors::VaultError::CommitAlreadyExists);
+    }
+
     env.storage().persistent().set(&key, commit);
-    
-    // TTL for commit: 30 minutes (MEV reveal window)
-    // Convert seconds to ledgers (5 seconds per ledger)
-    let commit_ttl_ledgers = ((MEV_COMMIT_WINDOW_SECS + LEDGER_SECONDS - 1) / LEDGER_SECONDS) as u32;
-    let commit_ttl_threshold = commit_ttl_ledgers / 2;
-    
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, commit_ttl_threshold, commit_ttl_ledgers);
+    env.storage().persistent().extend_ttl(
+        &key,
+        MEV_COMMIT_TTL_THRESHOLD,
+        MEV_COMMIT_TTL_LEDGERS,
+    );
+
+    Ok(())
 }
 
 /// Retrieve a stored commit hash for a (depositor, deposit_id) pair.
-/// Returns None if no commit exists for this pair.
+/// Returns `None` if no commit exists for this pair (e.g. already revealed
+/// or the reveal window has expired).
 pub fn get_mev_commit(env: &Env, depositor: &Address, deposit_id: u32) -> Option<Bytes> {
     let key = VaultKey::MevCommit(depositor.clone(), deposit_id);
-    env.storage().persistent().get(&key)
+    let commit: Option<Bytes> = env.storage().persistent().get(&key);
+    if commit.is_some() {
+        // Keep the commit alive for the remainder of the reveal window.
+        env.storage().persistent().extend_ttl(
+            &key,
+            MEV_COMMIT_TTL_THRESHOLD,
+            MEV_COMMIT_TTL_LEDGERS,
+        );
+    }
+    commit
 }
 
 /// Delete a commit hash after successful reveal.
 /// Prevents replay attacks and cleans up storage.
 pub fn remove_mev_commit(env: &Env, depositor: &Address, deposit_id: u32) {
     let key = VaultKey::MevCommit(depositor.clone(), deposit_id);
-    env.storage().persistent().remove(&key);
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().remove(&key);
+    }
 }
