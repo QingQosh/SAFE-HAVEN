@@ -106,29 +106,6 @@ pub fn set_market_paused(env: &Env, paused: bool) -> bool {
 }
 
 // ================================================================
-//  Total Fees Accumulator Helpers (Issue #98)
-// ================================================================
-
-/// Returns the running total of fees collected across all claims.
-/// Defaults to `0` if no fees have been collected yet.
-pub fn get_total_fees(env: &Env) -> i128 {
-    let key = soroban_sdk::Symbol::new(env, "pm_fees");
-    env.storage().persistent().get::<_, i128>(&key).unwrap_or(0)
-}
-
-/// Adds `amount` to the running total of fees collected and persists it.
-/// Returns the new total.
-pub fn add_to_total_fees(env: &Env, amount: i128) -> i128 {
-    let key = soroban_sdk::Symbol::new(env, "pm_fees");
-    let total = get_total_fees(env) + amount;
-    env.storage().persistent().set(&key, &total);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, MARKET_BUMP_THRESHOLD, MARKET_BUMP_TARGET);
-    total
-}
-
-// ================================================================
 //  Market CRUD Helpers
 // ================================================================
 

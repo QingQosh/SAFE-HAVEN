@@ -62,18 +62,6 @@ pub fn winnings_claimed(
     env.events().publish(topics, (amount, fee));
 }
 
-/// Emitted when accumulated fees are distributed to the fee recipient
-pub fn fees_distributed(
-    env: &Env,
-    market_id: u32,
-    recipient: &Address,
-    fee: i128,
-    total_fees: i128,
-) {
-    let topics = (symbol_short!("fee_dist"), market_id, recipient.clone());
-    env.events().publish(topics, (fee, total_fees));
-}
-
 /// Emitted when a market is cancelled (all bets refunded)
 pub fn market_cancelled(env: &Env, market_id: u32, cancelled_by: &Address, total_refunded: i128) {
     let topics = (symbol_short!("mkt_end"), market_id);
