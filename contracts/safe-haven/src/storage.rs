@@ -1,7 +1,10 @@
 use soroban_sdk::{token, Address, Bytes, Env, Vec};
 
-use crate::types::{DepositSubscription, MultiTokenVaultEntry, SubscriptionExecution, SubscriptionStats, TaxLossHarvest, VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS};
-use crate::types::CircuitBreakerActivation;
+use crate::types::{
+    CircuitBreakerActivation, DepositSubscription, LedgerVaultEntry, MultiTokenVaultEntry,
+    SessionKeyEntry, SubscriptionExecution, SubscriptionStats, SustainabilityMetrics,
+    TaxLossHarvest, VaultEntry, VaultKey, MAX_LOCK_DURATION_SECS,
+};
 
 // ================================================================
 // LEDGER_SECONDS: Average time between Stellar ledger closes
@@ -437,6 +440,9 @@ pub fn remove_pending_admin(env: &Env) {
 //  Initialized flag
 // ----------------------------------------------------------------
 
+/// Mark the contract as initialized. Must be called in the same invocation
+/// as the rest of the initial state (admin, fee_recipient, etc.) so that
+/// the whole setup is atomic — if any step traps, nothing is persisted.
 pub fn set_initialized(env: &Env) {
     env.storage()
         .persistent()
@@ -446,11 +452,23 @@ pub fn set_initialized(env: &Env) {
         .extend_ttl(&VaultKey::Initialized, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
+/// Returns `true` once `initialize()` has completed successfully.
 pub fn is_initialized(env: &Env) -> bool {
     env.storage()
         .persistent()
         .get::<VaultKey, bool>(&VaultKey::Initialized)
         .unwrap_or(false)
+}
+
+/// Guard used at the top of `initialize()`. Returns
+/// `Err(VaultError::AlreadyInitialized)` if the flag is already set, so a
+/// second call cannot replace the admin or fee recipient.
+pub fn require_not_initialized(env: &Env) -> Result<(), crate::errors::VaultError> {
+    if is_initialized(env) {
+        Err(crate::errors::VaultError::AlreadyInitialized)
+    } else {
+        Ok(())
+    }
 }
 
 // ----------------------------------------------------------------
@@ -916,6 +934,12 @@ pub fn get_staker(env: &Env, staker: &Address) -> Option<i128> {
     env.storage().persistent().get(&key)
 }
 
+/// Remove a staker's active stake entry. The historical staker list is append-only.
+pub fn remove_staker(env: &Env, staker: &Address) {
+    let key = VaultKey::Staker(staker.clone());
+    env.storage().persistent().remove(&key);
+}
+
 /// Get staker list (append-only, may contain stale entries after removes).
 fn get_staker_list(env: &Env) -> Vec<Address> {
     let key = VaultKey::StakerList;
@@ -925,18 +949,15 @@ fn get_staker_list(env: &Env) -> Vec<Address> {
         .unwrap_or_else(|| Vec::new(env))
 }
 
-/// Save the staker list.
-fn save_staker_list(env: &Env, stakers: &Vec<Address>) {
-    let key = VaultKey::StakerList;
-    env.storage().persistent().set(&key, stakers);
+fn get_indexed_staker_count(env: &Env) -> u32 {
     env.storage()
         .persistent()
-        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+        .get(&VaultKey::StakerCount)
+        .unwrap_or(0)
 }
 
-/// Add a staker to the staker list (O(1) if not already in list).
+/// Add a staker to the append-only list without rewriting the existing list.
 pub fn add_staker_to_list(env: &Env, staker: &Address) {
-    // Check if already in list using StakerInList flag
     let in_list_key = VaultKey::StakerInList(staker.clone());
     if env
         .storage()
@@ -947,12 +968,20 @@ pub fn add_staker_to_list(env: &Env, staker: &Address) {
         return; // Already in list, skip
     }
 
-    // Add to list
-    let mut list = get_staker_list(env);
-    list.push_back(staker.clone());
-    save_staker_list(env, &list);
+    let count_key = VaultKey::StakerCount;
+    let index = get_indexed_staker_count(env);
+    let entry_key = VaultKey::StakerListEntry(index);
+    env.storage().persistent().set(&entry_key, staker);
+    env.storage()
+        .persistent()
+        .extend_ttl(&entry_key, BUMP_THRESHOLD, BUMP_TARGET);
 
-    // Mark as in list
+    let count = index.saturating_add(1);
+    env.storage().persistent().set(&count_key, &count);
+    env.storage()
+        .persistent()
+        .extend_ttl(&count_key, BUMP_THRESHOLD, BUMP_TARGET);
+
     env.storage().persistent().set(&in_list_key, &true);
     env.storage()
         .persistent()
@@ -982,8 +1011,41 @@ pub fn get_rewards_pool(env: &Env) -> i128 {
 
 /// Update the rewards pool.
 pub fn set_rewards_pool(env: &Env, amount: i128) {
+    let current_pool = get_rewards_pool(env);
     let key = VaultKey::RewardsPool;
     env.storage().persistent().set(&key, &amount);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+
+    if amount > current_pool {
+        let generation = get_rewards_pool_generation(env).saturating_add(1);
+        set_rewards_pool_generation(env, generation);
+    }
+}
+
+/// Add newly replenished rewards to the pool and advance its claim generation.
+pub fn add_rewards_pool(env: &Env, amount: i128) {
+    if amount <= 0 {
+        return;
+    }
+
+    let current_pool = get_rewards_pool(env);
+    set_rewards_pool(env, current_pool.saturating_add(amount));
+}
+
+/// Get the current rewards-pool replenishment generation.
+pub fn get_rewards_pool_generation(env: &Env) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&VaultKey::RewardsPoolGeneration)
+        .unwrap_or(0)
+}
+
+/// Update the rewards-pool replenishment generation.
+pub fn set_rewards_pool_generation(env: &Env, generation: u32) {
+    let key = VaultKey::RewardsPoolGeneration;
+    env.storage().persistent().set(&key, &generation);
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
@@ -1004,9 +1066,42 @@ pub fn set_staker_rewards_claimed(env: &Env, staker: &Address, amount: i128) {
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
+/// Get the pool generation most recently claimed by a staker.
+pub fn get_staker_rewards_claimed_generation(env: &Env, staker: &Address) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&VaultKey::StakerRewardsClaimedGeneration(
+            staker.clone(),
+        ))
+        .unwrap_or(u32::MAX)
+}
+
+/// Record the pool generation claimed by a staker.
+pub fn set_staker_rewards_claimed_generation(
+    env: &Env,
+    staker: &Address,
+    generation: u32,
+) {
+    let key = VaultKey::StakerRewardsClaimedGeneration(staker.clone());
+    env.storage().persistent().set(&key, &generation);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
 /// Get the staker list (may contain stale entries). Active check via `get_staker`.
 pub fn get_stakers_list(env: &Env) -> Vec<Address> {
-    get_staker_list(env)
+    let mut stakers = get_legacy_staker_list(env);
+    for index in 0..get_indexed_staker_count(env) {
+        if let Some(staker) = env
+            .storage()
+            .persistent()
+            .get::<VaultKey, Address>(&VaultKey::StakerListEntry(index))
+        {
+            stakers.push_back(staker);
+        }
+    }
+    stakers
 }
 
 // ----------------------------------------------------------------
@@ -1378,6 +1473,37 @@ pub fn record_faucet_request(env: &Env, account: &Address, asset: &FaucetAsset, 
 //  Sustainability metrics helpers
 // ----------------------------------------------------------------
 
+/// Baseline carbon intensity: grams of CO2e emitted per unit of deposit
+/// amount per second of lock duration.
+///
+/// The carbon footprint of a deposit is computed as:
+/// `carbon_footprint = amount × duration_seconds × CARBON_BASELINE_PER_UNIT_SECOND`
+///
+/// The default baseline is 1 gram CO2e per unit per second. For example,
+/// 1000 units locked for 86,400 seconds (1 day) yields 86,400,000 grams CO2e.
+///
+/// This is a compile-time constant and is intentionally not configurable
+/// (no per-token baselines, no dynamic adjustment).
+pub const CARBON_BASELINE_PER_UNIT_SECOND: i128 = 1;
+
+/// Compute the carbon footprint for a deposit using checked arithmetic.
+///
+/// Returns `Err(VaultError::Overflow)` instead of panicking if the
+/// intermediate or final product exceeds the `i128` range. With the
+/// maximum deposit amount (10^15) and the maximum lock duration
+/// (5 years ≈ 157,680,000 seconds) the product is ≈ 1.58 × 10^23, which
+/// fits comfortably within `i128` (max ≈ 1.7 × 10^38).
+pub fn compute_carbon_footprint(
+    amount: i128,
+    duration_seconds: u64,
+) -> Result<i128, crate::errors::VaultError> {
+    let duration = i128::from(duration_seconds);
+    amount
+        .checked_mul(duration)
+        .and_then(|v| v.checked_mul(CARBON_BASELINE_PER_UNIT_SECOND))
+        .ok_or(crate::errors::VaultError::Overflow)
+}
+
 /// Store sustainability metrics for a specific deposit.
 pub fn set_sustainability_metrics(
     env: &Env,
@@ -1460,6 +1586,12 @@ pub fn set_total_carbon_offset(env: &Env, depositor: &Address, total: i128) {
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
+/// Number of sustainability milestone bits tracked in the bitmap.
+pub const MILESTONE_BITMAP_BITS: u32 = 4;
+
+/// Mask covering all valid milestone bits (4 bits → 0b1111).
+pub const MILESTONE_BITMAP_MASK: u32 = (1u32 << MILESTONE_BITMAP_BITS) - 1;
+
 /// Check if a depositor has achieved a specific milestone.
 /// Returns a bitmap where each bit represents a different milestone type.
 pub fn get_milestone_bitmap(env: &Env, depositor: &Address) -> u32 {
@@ -1471,14 +1603,64 @@ pub fn get_milestone_bitmap(env: &Env, depositor: &Address) -> u32 {
 }
 
 /// Set milestone bitmap for a depositor.
+///
+/// The bitmap is immutable once a bit is set: this helper only ever ORs the
+/// incoming bits into the stored value, so previously achieved milestones can
+/// never be cleared. Only bits within `MILESTONE_BITMAP_MASK` are persisted.
 pub fn set_milestone_bitmap(env: &Env, depositor: &Address, bitmap: u32) {
     let key = VaultKey::MilestoneAchieved(depositor.clone());
-    env.storage().persistent().set(&key, &bitmap);
+    let current: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+    let merged = (current | bitmap) & MILESTONE_BITMAP_MASK;
+    env.storage().persistent().set(&key, &merged);
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
+/// Returns `true` if the milestone identified by `bit` (0-based) has already
+/// been achieved by `depositor`. Out-of-range bits are treated as unset.
+pub fn is_milestone_set(env: &Env, depositor: &Address, bit: u32) -> bool {
+    if bit >= MILESTONE_BITMAP_BITS {
+        return false;
+    }
+    let bitmap = get_milestone_bitmap(env, depositor);
+    (bitmap & (1u32 << bit)) != 0
+}
+
+/// Mark the milestone identified by `bit` (0-based) as achieved for
+/// `depositor`. Returns `true` if this call newly set the bit (i.e. the
+/// milestone was not previously achieved), `false` if it was already set or
+/// `bit` is out of range. Bits are only ever set, never cleared.
+pub fn set_milestone(env: &Env, depositor: &Address, bit: u32) -> bool {
+    if bit >= MILESTONE_BITMAP_BITS {
+        return false;
+    }
+    let flag = 1u32 << bit;
+    let current = get_milestone_bitmap(env, depositor);
+    if (current & flag) != 0 {
+        return false;
+    }
+    set_milestone_bitmap(env, depositor, flag);
+    true
+}
+
+
+// ----------------------------------------------------------------
+//  Session key helpers
+// ----------------------------------------------------------------
+
+/// Get a session key entry by delegator and session key ID.
+pub fn get_session_key(env: &Env, delegator: &Address, key_id: u32) -> Option<SessionKeyEntry> {
+    env.storage()
+        .persistent()
+        .get::<VaultKey, SessionKeyEntry>(&VaultKey::SessionKey(delegator.clone(), key_id))
+}
+
+/// Set a session key entry.
+pub fn set_session_key(env: &Env, delegator: &Address, key_id: u32, entry: &SessionKeyEntry) {
+    let key = VaultKey::SessionKey(delegator.clone(), key_id);
+    env.storage().persistent().set(&key, entry);
+}
 
 // ================================================================
 //  NFT Evolution helpers
@@ -1498,6 +1680,51 @@ pub fn set_nft_evolution(
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
+/// Remove a session key entry.
+pub fn delete_session_key(env: &Env, delegator: &Address, key_id: u32) {
+    let key = VaultKey::SessionKey(delegator.clone(), key_id);
+    env.storage().persistent().remove(&key);
+}
+
+/// Get the next session key ID for a delegator (and increment counter).
+pub fn get_and_increment_session_key_counter(env: &Env, delegator: &Address) -> u32 {
+    let counter_key = VaultKey::SessionKeyCounter(delegator.clone());
+    let current: u32 = env.storage()
+        .persistent()
+        .get::<VaultKey, u32>(&counter_key)
+        .unwrap_or(0);
+    let next_id = current.saturating_add(1);
+    env.storage().persistent().set(&counter_key, &next_id);
+    env.storage()
+        .persistent()
+        .extend_ttl(&counter_key, BUMP_THRESHOLD, BUMP_TARGET);
+    current
+}
+
+/// Get the active session key IDs for a delegator.
+pub fn get_active_session_key_ids(env: &Env, delegator: &Address) -> Vec<u32> {
+    let key = VaultKey::ActiveSessionKeyIds(delegator.clone());
+    env.storage()
+        .persistent()
+        .get::<VaultKey, Vec<u32>>(&key)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Set the active session key IDs for a delegator.
+pub fn set_active_session_key_ids(env: &Env, delegator: &Address, ids: &Vec<u32>) {
+    let key = VaultKey::ActiveSessionKeyIds(delegator.clone());
+    env.storage().persistent().set(&key, ids);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Add a session key ID to the active list for a delegator.
+pub fn add_active_session_key_id(env: &Env, delegator: &Address, key_id: u32) {
+    let mut ids = get_active_session_key_ids(env, delegator);
+    ids.push_back(key_id);
+    set_active_session_key_ids(env, delegator, &ids);
+}
 /// Retrieve an NFT evolution record (mutable path — extends TTL).
 pub fn get_nft_evolution(
     env: &Env,
@@ -1528,4 +1755,120 @@ pub fn get_nft_evolution_readonly(
 pub fn remove_nft_evolution(env: &Env, depositor: &Address, deposit_id: u32) {
     let key = crate::types::VaultKey::NFTEvolution(depositor.clone(), deposit_id);
     env.storage().persistent().remove(&key);
+}
+
+// ----------------------------------------------------------------
+//  Staker pool helpers (Issue #111)
+//
+//  30 % of each cancel_deposit penalty goes to fee_recipient.
+//  70 % accumulates here, per token, until claimed via claim_staker_pool.
+// ----------------------------------------------------------------
+
+/// Basis-points numerator for the fee-recipient slice (30 %).
+pub const STAKER_FEE_BPS: i128 = 3_000;
+/// Basis-points numerator for the staker-pool slice (70 %).
+pub const STAKER_POOL_BPS: i128 = 7_000;
+
+/// Return the current staker-pool balance for `token`, defaulting to 0.
+pub fn get_staker_pool_balance(env: &Env, token: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&VaultKey::StakerPool(token.clone()))
+        .unwrap_or(0_i128)
+}
+
+/// Overwrite the staker-pool balance for `token`.
+pub fn set_staker_pool_balance(env: &Env, token: &Address, balance: i128) {
+    let key = VaultKey::StakerPool(token.clone());
+    env.storage().persistent().set(&key, &balance);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Add `amount` to the staker-pool balance for `token`.
+/// Called during `cancel_deposit` to accumulate the 70 % staker slice.
+pub fn accumulate_staker_pool(env: &Env, token: &Address, amount: i128) {
+    let current = get_staker_pool_balance(env, token);
+    set_staker_pool_balance(env, token, current.saturating_add(amount));
+}
+
+/// Atomically drain the staker-pool balance for `token` to zero and return
+/// the amount that was held.  Returns 0 if the pool was empty.
+pub fn drain_staker_pool(env: &Env, token: &Address) -> i128 {
+    let balance = get_staker_pool_balance(env, token);
+    if balance > 0 {
+        let key = VaultKey::StakerPool(token.clone());
+        env.storage().persistent().remove(&key);
+    }
+    balance
+}
+
+
+// ----------------------------------------------------------------
+//  MEV Protection: Commit-Reveal Scheme
+// ----------------------------------------------------------------
+
+/// Number of ledgers that cover the MEV commit reveal window
+/// (`MEV_COMMIT_WINDOW_SECS`, 30 minutes), rounded up.
+pub const MEV_COMMIT_TTL_LEDGERS: u32 =
+    ((crate::types::MEV_COMMIT_WINDOW_SECS + LEDGER_SECONDS - 1) / LEDGER_SECONDS) as u32;
+/// Refresh threshold for the commit TTL — bump when half the window remains.
+pub const MEV_COMMIT_TTL_THRESHOLD: u32 = MEV_COMMIT_TTL_LEDGERS / 2;
+
+/// Store a commit hash for a (depositor, deposit_id) pair.
+///
+/// The commit is keyed by `VaultKey::MevCommit(depositor, deposit_id)` in
+/// persistent storage and its TTL is extended to cover the full
+/// `MEV_COMMIT_WINDOW_SECS` (30 minute) reveal window.
+///
+/// A commit cannot be overwritten: if one already exists for this pair the
+/// call returns `Err(VaultError::CommitAlreadyExists)` and leaves the stored
+/// value untouched.
+pub fn set_mev_commit(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+    commit: &Bytes,
+) -> Result<(), crate::errors::VaultError> {
+    let key = VaultKey::MevCommit(depositor.clone(), deposit_id);
+
+    if env.storage().persistent().has(&key) {
+        return Err(crate::errors::VaultError::CommitAlreadyExists);
+    }
+
+    env.storage().persistent().set(&key, commit);
+    env.storage().persistent().extend_ttl(
+        &key,
+        MEV_COMMIT_TTL_THRESHOLD,
+        MEV_COMMIT_TTL_LEDGERS,
+    );
+
+    Ok(())
+}
+
+/// Retrieve a stored commit hash for a (depositor, deposit_id) pair.
+/// Returns `None` if no commit exists for this pair (e.g. already revealed
+/// or the reveal window has expired).
+pub fn get_mev_commit(env: &Env, depositor: &Address, deposit_id: u32) -> Option<Bytes> {
+    let key = VaultKey::MevCommit(depositor.clone(), deposit_id);
+    let commit: Option<Bytes> = env.storage().persistent().get(&key);
+    if commit.is_some() {
+        // Keep the commit alive for the remainder of the reveal window.
+        env.storage().persistent().extend_ttl(
+            &key,
+            MEV_COMMIT_TTL_THRESHOLD,
+            MEV_COMMIT_TTL_LEDGERS,
+        );
+    }
+    commit
+}
+
+/// Delete a commit hash after successful reveal.
+/// Prevents replay attacks and cleans up storage.
+pub fn remove_mev_commit(env: &Env, depositor: &Address, deposit_id: u32) {
+    let key = VaultKey::MevCommit(depositor.clone(), deposit_id);
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().remove(&key);
+    }
 }

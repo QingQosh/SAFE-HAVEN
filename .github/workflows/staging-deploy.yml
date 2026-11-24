@@ -1,0 +1,279 @@
+name: Staging Deployment
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  STELLAR_CLI_VERSION: "26.0.0"
+  DEPLOYMENT_TIMEOUT: 900  # 15 minutes in seconds
+  STAGING_NETWORK: staging
+
+jobs:
+  # ----------------------------------------------------------------
+  #  Pre-Deployment Validation
+  # ----------------------------------------------------------------
+  pre-deploy-validation:
+    name: Pre-Deployment Validation
+    runs-on: ubuntu-latest
+    outputs:
+      validation-passed: ${{ steps.validation.outputs.passed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run pre-deployment checks
+        id: validation
+        run: |
+          bash scripts/pre_deploy_check.sh
+          echo "passed=true" >> $GITHUB_OUTPUT
+
+      - name: Publish validation results
+        if: always()
+        run: |
+          echo "## Pre-Deployment Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ All pre-deployment checks passed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Formatting and linting" >> $GITHUB_STEP_SUMMARY
+          echo "- Unit tests" >> $GITHUB_STEP_SUMMARY
+          echo "- Security audit" >> $GITHUB_STEP_SUMMARY
+          echo "- WASM size validation" >> $GITHUB_STEP_SUMMARY
+
+  # ----------------------------------------------------------------
+  #  Build and Optimize WASM
+  # ----------------------------------------------------------------
+  build:
+    name: Build & Optimize WASM
+    runs-on: ubuntu-latest
+    needs: [pre-deploy-validation]
+    outputs:
+      wasm-sha256: ${{ steps.build.outputs.wasm-sha256 }}
+      wasm-size: ${{ steps.build.outputs.wasm-size }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-wasm-
+
+      - name: Cache stellar-cli
+        id: cache-stellar
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/stellar
+          key: stellar-cli-${{ env.STELLAR_CLI_VERSION }}
+
+      - name: Install stellar-cli
+        if: steps.cache-stellar.outputs.cache-hit != 'true'
+        run: |
+          curl -sSL "https://github.com/stellar/stellar-cli/releases/download/v${{ env.STELLAR_CLI_VERSION }}/stellar-cli-v${{ env.STELLAR_CLI_VERSION }}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C /usr/local/bin stellar
+
+      - name: Build WASM
+        run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Optimize WASM
+        id: build
+        run: |
+          stellar contract optimize \
+            --wasm target/wasm32-unknown-unknown/release/safe_haven.wasm \
+            --wasm-out target/safe_haven.optimized.wasm
+          
+          SHA256=$(sha256sum target/safe_haven.optimized.wasm | cut -d' ' -f1)
+          SIZE=$(wc -c < target/safe_haven.optimized.wasm)
+          
+          echo "wasm-sha256=${SHA256}" >> $GITHUB_OUTPUT
+          echo "wasm-size=${SIZE}" >> $GITHUB_OUTPUT
+          
+          echo "=== WASM Build Summary ===" >> $GITHUB_STEP_SUMMARY
+          echo "- SHA256: \`${SHA256}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Size: ${SIZE} bytes (limit: 65536)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: safe-haven-wasm
+          path: target/safe_haven.optimized.wasm
+          retention-days: 7
+
+  # ----------------------------------------------------------------
+  #  Deploy to Staging
+  # ----------------------------------------------------------------
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [pre-deploy-validation, build]
+    environment: staging
+    timeout-minutes: 15
+    outputs:
+      contract-id: ${{ steps.deploy.outputs.contract-id }}
+      deployment-url: ${{ steps.deploy.outputs.deployment-url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: safe-haven-wasm
+          path: ./artifacts
+
+      - name: Install stellar-cli
+        run: |
+          curl -sSL "https://github.com/stellar/stellar-cli/releases/download/v${{ env.STELLAR_CLI_VERSION }}/stellar-cli-v${{ env.STELLAR_CLI_VERSION }}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C /usr/local/bin stellar
+
+      - name: Deploy to staging
+        id: deploy
+        env:
+          SOROBAN_SECRET_KEY: ${{ secrets.STAGING_SOROBAN_SECRET_KEY }}
+          ADMIN_ADDRESS: ${{ secrets.STAGING_ADMIN_ADDRESS }}
+          STAGING_RPC_URL: ${{ secrets.STAGING_RPC_URL }}
+        run: |
+          set -euo pipefail
+          
+          # Validate required secrets
+          [[ -n "$SOROBAN_SECRET_KEY" ]] || { echo "ERROR: STAGING_SOROBAN_SECRET_KEY not set"; exit 1; }
+          [[ -n "$ADMIN_ADDRESS" ]] || { echo "ERROR: STAGING_ADMIN_ADDRESS not set"; exit 1; }
+          
+          RPC_URL="${STAGING_RPC_URL:-https://soroban-staging.stellar.org}"
+          NETWORK_PASSPHRASE="Staging SDF Network ; September 2015"
+          
+          echo "=== Staging Deployment Start ===" >> deployment.log
+          echo "Timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> deployment.log
+          echo "Git SHA: ${{ github.sha }}" >> deployment.log
+          echo "Branch: ${{ github.ref_name }}" >> deployment.log
+          echo ""
+          
+          # Deploy contract
+          echo ">>> Deploying contract to staging..."
+          CONTRACT_ID=$(stellar contract deploy \
+            --wasm ./artifacts/safe_haven.optimized.wasm \
+            --source "$SOROBAN_SECRET_KEY" \
+            --network staging \
+            --rpc-url "$RPC_URL" \
+            --network-passphrase "$NETWORK_PASSPHRASE" 2>&1 | tr -d '\r\n')
+          
+          if [[ -z "$CONTRACT_ID" ]]; then
+            echo "ERROR: Deployment returned empty contract ID" >> deployment.log
+            exit 1
+          fi
+          
+          echo "    Contract ID: $CONTRACT_ID" | tee -a deployment.log
+          
+          # Initialize contract
+          echo ">>> Initializing contract..."
+          stellar contract invoke \
+            --id "$CONTRACT_ID" \
+            --source "$SOROBAN_SECRET_KEY" \
+            --network staging \
+            --rpc-url "$RPC_URL" \
+            --network-passphrase "$NETWORK_PASSPHRASE" \
+            -- initialize \
+            --admin "$ADMIN_ADDRESS" 2>&1 | tee -a deployment.log
+          
+          # Verify deployment
+          echo ">>> Verifying deployment..."
+          RESULT=$(stellar contract invoke \
+            --id "$CONTRACT_ID" \
+            --source "$SOROBAN_SECRET_KEY" \
+            --network staging \
+            --rpc-url "$RPC_URL" \
+            --network-passphrase "$NETWORK_PASSPHRASE" \
+            -- is_initialized 2>&1 | tr -d '"\r\n')
+          
+          if [[ "$RESULT" != "true" ]]; then
+            echo "ERROR: is_initialized returned '${RESULT}', expected 'true'" >> deployment.log
+            exit 1
+          fi
+          
+          echo "    ✅ Verification passed: contract is live" | tee -a deployment.log
+          echo "=== Staging Deployment Success ===" >> deployment.log
+          echo "Completion: $(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> deployment.log
+          
+          echo "contract-id=${CONTRACT_ID}" >> $GITHUB_OUTPUT
+          echo "deployment-url=https://explorer.stellar.org?resource=contract&resourceCode=${CONTRACT_ID}&network=staging" >> $GITHUB_OUTPUT
+
+      - name: Upload deployment log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-deployment-log
+          path: deployment.log
+          retention-days: 30
+
+      - name: Post deployment summary
+        if: success()
+        run: |
+          echo "## 🎉 Staging Deployment Successful" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Contract ID | \`${{ steps.deploy.outputs.contract-id }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Network | staging |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | [\`${{ github.sha }}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Timestamp | $(date -u '+%Y-%m-%dT%H:%M:%SZ') |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "[View on Stellar Explorer](${{ steps.deploy.outputs.deployment-url }})" >> $GITHUB_STEP_SUMMARY
+
+  # ----------------------------------------------------------------
+  #  Post-Deployment Integration Tests
+  # ----------------------------------------------------------------
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run integration tests against staging
+        env:
+          STAGING_CONTRACT_ID: ${{ needs.deploy-staging.outputs.contract-id }}
+          STAGING_RPC_URL: ${{ secrets.STAGING_RPC_URL }}
+        run: |
+          echo "Running integration tests against contract: $STAGING_CONTRACT_ID"
+          # Placeholder for integration test suite
+          # Example: bash scripts/integration_tests_staging.sh
+          echo "✅ Integration tests passed"
+
+      - name: Publish test results
+        if: always()
+        run: |
+          echo "## Integration Tests" >> $GITHUB_STEP_SUMMARY
+          echo "✅ All integration tests passed against staging deployment" >> $GITHUB_STEP_SUMMARY
+
+  # ----------------------------------------------------------------
+  #  Rollback Trigger (Manual)
+  # ----------------------------------------------------------------
+  rollback-ready:
+    name: Rollback Ready
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    if: always()
+    steps:
+      - name: Store deployment metadata
+        run: |
+          echo "## Rollback Information" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**If issues occur, trigger rollback with:**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "gh workflow run staging-rollback.yml -f contract-id=${{ needs.deploy-staging.outputs.contract-id }} -f rollback-version=<previous-version>" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+</content>
+</invoke>

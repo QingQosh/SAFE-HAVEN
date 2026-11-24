@@ -13,14 +13,34 @@ use crate::prediction_market_types::*;
 //  Market Initialization
 // ================================================================
 
-/// Initialize the prediction market subsystem
-pub fn initialize_markets(
+/// Default fee applied when `init_prediction_markets` is called without an
+/// explicit fee (100 basis points = 1%).
+pub const DEFAULT_FEE_BPS: u32 = 100;
+
+/// Initialize the prediction market subsystem.
+///
+/// This is a one-time setup entry point. It:
+/// - requires authorization from `admin`,
+/// - returns `AlreadyInitialized` if the subsystem was already set up,
+/// - defaults `fee_bps` to [`DEFAULT_FEE_BPS`] (100 = 1%) when `None`,
+/// - validates that the fee does not exceed [`MAX_FEE_BPS`],
+/// - persists the resulting [`MarketConfig`] and marks the subsystem as
+///   initialized.
+pub fn init_prediction_markets(
     env: &Env,
     admin: Address,
     fee_recipient: Address,
-    default_fee_bps: u32,
+    fee_bps: Option<u32>,
 ) -> Result<(), PredictionMarketError> {
     admin.require_auth();
+
+    // Prevent re-initialization
+    if storage::is_pm_initialized(env) {
+        return Err(PredictionMarketError::AlreadyInitialized);
+    }
+
+    // Resolve the fee, defaulting to 1% when not supplied
+    let default_fee_bps = fee_bps.unwrap_or(DEFAULT_FEE_BPS);
 
     // Validate fee
     if default_fee_bps > MAX_FEE_BPS {
@@ -37,7 +57,21 @@ pub fn initialize_markets(
     };
 
     storage::set_market_config(env, &config);
+    storage::set_pm_initialized(env);
     Ok(())
+}
+
+/// Initialize the prediction market subsystem with an explicit fee.
+///
+/// Thin wrapper around [`init_prediction_markets`] kept for callers that
+/// already pass a concrete fee value.
+pub fn initialize_markets(
+    env: &Env,
+    admin: Address,
+    fee_recipient: Address,
+    default_fee_bps: u32,
+) -> Result<(), PredictionMarketError> {
+    init_prediction_markets(env, admin, fee_recipient, Some(default_fee_bps))
 }
 
 // ================================================================
@@ -58,9 +92,13 @@ pub fn create_market(
 ) -> Result<u32, PredictionMarketError> {
     creator.require_auth();
 
+    // Load config from persistent storage so the pause flag survives across
+    // invocations. `initialize_markets` seeds `paused: false`.
     let config = storage::get_market_config(env)
         .ok_or(PredictionMarketError::InternalError)?;
 
+    // Pause enforcement: reject new market creation before any timing
+    // validation or state writes occur.
     if config.paused {
         return Err(PredictionMarketError::MarketPaused);
     }
@@ -109,6 +147,7 @@ pub fn create_market(
         market_id,
         market_type: market_type.clone(),
         description,
+        creator: creator.clone(),
         oracle: oracle.clone(),
         close_time,
         resolution_deadline,
@@ -124,7 +163,9 @@ pub fn create_market(
 
     storage::set_market(env, &market);
 
-    // Create outcomes
+    // Create outcomes and persist the ordered names list (Issue #100)
+    storage::set_outcome_names_list(env, market_id, &outcome_names);
+
     for (idx, name) in outcome_names.iter().enumerate() {
         let outcome = MarketOutcome {
             outcome_id: idx as u32,
@@ -166,9 +207,9 @@ pub fn place_bet(
     let mut market = storage::get_market(env, market_id)
         .ok_or(PredictionMarketError::MarketNotFound)?;
 
-    // Check market is open
+    // Check market is open (bets are rejected once the market is Closed/Resolved/Cancelled)
     if market.status != MarketStatus::Open {
-        return Err(PredictionMarketError::BettingClosed);
+        return Err(PredictionMarketError::MarketNotOpen);
     }
 
     // Check betting deadline
@@ -185,9 +226,8 @@ pub fn place_bet(
     let mut outcome = storage::get_outcome(env, market_id, outcome_id)
         .ok_or(PredictionMarketError::InvalidOutcomeId)?;
 
-    // Check if user already bet on this outcome
-    let existing_bet = storage::get_bet_readonly(env, market_id, outcome_id, &bettor);
-    if existing_bet.is_some() {
+    // Check if user already bet on this outcome in the market
+    if storage::has_user_bet_on_outcome(env, &bettor, market_id, outcome_id) {
         return Err(PredictionMarketError::AlreadyBetOnOutcome);
     }
 
@@ -212,16 +252,15 @@ pub fn place_bet(
     outcome.bettor_count = outcome.bettor_count.saturating_add(1);
     storage::set_outcome(env, market_id, &outcome);
 
+    // Track the bettor's outcome membership in this market so duplicates are prevented explicitly.
+    storage::add_user_market_outcome(env, &bettor, market_id, outcome_id);
+
     // Update market
     market.total_pool = market.total_pool.saturating_add(amount);
-    if existing_bet.is_none() {
-        // Only increment bettor count if this is user's first bet on this market
-        let user_bet_key = format!("pmub_{}_{}", market_id, bettor);
-        let _first_bet = env.storage().persistent().get::<_, Option<bool>>(&soroban_sdk::Symbol::from_str(env, &user_bet_key));
-        if _first_bet.is_none() {
-            market.bettor_count = market.bettor_count.saturating_add(1);
-            env.storage().persistent().set(&soroban_sdk::Symbol::from_str(env, &user_bet_key), &true);
-        }
+    let market_outcomes = storage::get_user_market_outcomes(env, &bettor, market_id)
+        .unwrap_or_else(|| Vec::new(env));
+    if market_outcomes.len() == 1 {
+        market.bettor_count = market.bettor_count.saturating_add(1);
     }
     storage::set_market(env, &market);
 
@@ -241,17 +280,15 @@ pub fn close_market(env: &Env, closer: Address, market_id: u32) -> Result<(), Pr
     let config = storage::get_market_config(env)
         .ok_or(PredictionMarketError::InternalError)?;
 
-    // Only admin or oracle can close
-    if closer != config.admin && closer != storage::get_market_readonly(env, market_id)
-        .ok_or(PredictionMarketError::MarketNotFound)?
-        .oracle
-    {
-        return Err(PredictionMarketError::Unauthorized);
-    }
-
     let mut market = storage::get_market(env, market_id)
         .ok_or(PredictionMarketError::MarketNotFound)?;
 
+    // Only creator, admin or oracle can close
+    if closer != market.creator && closer != config.admin && closer != market.oracle {
+        return Err(PredictionMarketError::Unauthorized);
+    }
+
+    // Idempotent close: a second close (or closing a non-Open market) is rejected
     if market.status != MarketStatus::Open {
         return Err(PredictionMarketError::InvalidMarketStatus);
     }
@@ -442,8 +479,14 @@ pub fn cancel_market(
     let mut market = storage::get_market(env, market_id)
         .ok_or(PredictionMarketError::MarketNotFound)?;
 
-    if market.status == MarketStatus::Resolved {
-        return Err(PredictionMarketError::MarketAlreadyResolved);
+    match market.status {
+        MarketStatus::Open | MarketStatus::Closed => {}
+        MarketStatus::Resolved => {
+            return Err(PredictionMarketError::MarketAlreadyResolved);
+        }
+        MarketStatus::Cancelled => {
+            return Err(PredictionMarketError::InvalidMarketStatus);
+        }
     }
 
     market.status = MarketStatus::Cancelled;
@@ -498,8 +541,17 @@ pub fn get_market_details(env: &Env, market_id: u32) -> Option<PredictionMarket>
     storage::get_market_readonly(env, market_id)
 }
 
-/// Get outcome details
+/// Get outcome details (Issue #96).
+///
+/// Returns the stored `MarketOutcome` for the given `(market_id, outcome_id)`,
+/// which includes `outcome_id`, `name`, `total_bet_amount` and `bettor_count`.
+/// Returns `None` if the market or the outcome does not exist.
 pub fn get_outcome_details(env: &Env, market_id: u32, outcome_id: u32) -> Option<MarketOutcome> {
+    // Ensure the market exists so we never return a stale/orphaned outcome.
+    let market = storage::get_market_readonly(env, market_id)?;
+    if outcome_id >= market.outcome_count {
+        return None;
+    }
     storage::get_outcome_readonly(env, market_id, outcome_id)
 }
 
@@ -513,8 +565,27 @@ pub fn get_bet_details(
     storage::get_bet_readonly(env, market_id, outcome_id, bettor)
 }
 
+/// Get a market together with its ordered list of outcomes (Issue #100).
+///
+/// Returns `None` if the market does not exist.
+/// The `outcomes` field is ordered by `outcome_id` (0, 1, 2 …) and its
+/// length equals `market.outcome_count`, so callers can index directly:
+///
+/// ```
+/// if let Some(mwo) = get_market_with_outcomes(env, 1) {
+///     let first_outcome = mwo.outcomes.get(0); // outcome_id 0
+/// }
+/// ```
+pub fn get_market_with_outcomes(env: &Env, market_id: u32) -> Option<MarketWithOutcomes> {
+    let market = storage::get_market_readonly(env, market_id)?;
+    let outcomes = storage::get_market_outcomes(env, market_id, market.outcome_count);
+    Some(MarketWithOutcomes { market, outcomes })
+}
+
 // Helper for readonly outcome access
 fn get_outcome_readonly(env: &Env, market_id: u32, outcome_id: u32) -> Option<MarketOutcome> {
-    let key = soroban_sdk::Symbol::from_str(env, &format!("pmo_{}_{}", market_id, outcome_id));
+    let key = soroban_sdk::Symbol::new(env, &format!("pmo_{}_{}", market_id, outcome_id));
     env.storage().persistent().get(&key)
 }
+
+// Helper for readonly outcome access is provided by storage::get_outcome_readonly

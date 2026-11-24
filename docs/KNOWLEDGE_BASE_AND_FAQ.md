@@ -290,63 +290,45 @@ If there's a critical bug or attack, the admin can call `emergency_withdraw(your
 
 ### Q16. How do I become a staker?
 
-**A:** Register with an amount of tokens:
+**A:** Call `register_staker(staker, amount)` with a positive numeric weight and authorize the transaction with the staker's wallet. There is no staking page or UI implied by this contract call.
 
-1. Go to the Admin or Staking page (if available)
-2. Click "Register as Staker"
-3. Enter the amount of tokens you want to stake
-4. Confirm the transaction
-5. You're now registered and earning rewards
+The amount is only a registry weight. Registration does **not** transfer or lock tokens, and the contract does not associate the amount with a token or decimal precision. Re-registering replaces the old amount; zero and negative amounts are rejected.
 
 **What does staking do?**
-When other users exit their deposits early, the penalty is split:
-- 30% to the fee recipient
-- 70% to the staker rewards pool
+Early cancellation of timestamp-based and ledger-based single-token deposits adds the nominal staker share of the penalty (70%) to the rewards-pool accounting; the other 30% goes to the fee recipient. Multi-token early cancellation currently sends the full penalty to the fee recipient.
 
-Your share of the staker pool is proportional to your stake relative to total staked.
+The registry amount acts as a relative weight. The pool is not separated by token and there is no public getter for the pool or registry totals, so applications need an event indexer or trusted state source to display them.
 
-**Example:**
-- You stake 1,000 tokens
-- Total all stakers: 10,000 tokens
-- Your share: 10%
-
-If the staker pool accumulates 1,000 tokens from penalties, you can claim 100 tokens.
+See the [Staker Registry User Guide](./STAKER_REGISTRY_GUIDE.md) for exact penalty rounding, examples, and transaction steps.
 
 ---
 
 ### Q17. How do I claim staker rewards?
 
-**A:** Go to the Admin or Staking page:
-
-1. Click "Claim Rewards"
-2. Confirm the transaction
-3. Your rewards are transferred to your wallet
+**A:** Submit `claim_staker_rewards(staker)` and authorize it with that staker's wallet. On success, the contract calculates an amount, reduces its pool-accounting value, and emits a `RewardsClaimed` event. The current implementation does **not** transfer tokens to your wallet; do not treat a successful claim as a payment.
 
 **Requirements:**
 - You must be a registered staker
 - There must be rewards in the pool
-- Your proportional reward must be > 0 tokens
+- Your calculated integer amount must be greater than zero (integer division can round to zero)
 
-**Note:** Rewards are calculated at claim time, not continuously. The more often users exit early, the more the pool grows.
+Claims use the current pool and total registered weight. The pool changes after each claim, so claim timing/order and integer rounding affect subsequent amounts.
 
 ---
 
 ### Q18. Can I increase or decrease my stake?
 
-**A:** Yes, re-register with a new amount. If you want to:
-- **Increase stake:** Register with a higher amount
-- **Decrease stake:** Register with a lower amount
+**A:** Yes. Re-register with a new positive amount; it replaces the existing weight. If you want to:
+- **Increase weight:** Register with a higher amount
+- **Decrease weight:** Register with a lower positive amount
 
-Your stake is updated immediately. Your proportional reward share is recalculated based on the new stake and total staked.
+The total registered amount and claim calculations change immediately. No tokens are deposited or returned by this update.
 
 ---
 
 ### Q19. What happens if I unregister as a staker?
 
-**A:** You can register with an amount of 0 to effectively unregister, but there's no explicit `unregister` function. Once you register with 0:
-- You stop earning new rewards
-- You can still claim any rewards you've already earned
-- Your stake is removed from the total
+**A:** There is no unregister method, and registering zero fails. You can lower your weight to a positive amount, but it remains in the total registered amount.
 
 ---
 

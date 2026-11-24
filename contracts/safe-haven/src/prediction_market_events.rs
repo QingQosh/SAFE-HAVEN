@@ -13,7 +13,7 @@ pub fn market_created(
     close_time: u64,
     outcome_count: u32,
 ) {
-    let topics = (symbol_short!("mkt_create"), market_id);
+    let topics = (symbol_short!("mkt_new"), market_id);
     env.events().publish(
         topics,
         (market_type.clone(), oracle.clone(), close_time, outcome_count),
@@ -46,7 +46,7 @@ pub fn market_resolved(
     oracle: &Address,
     total_pool: i128,
 ) {
-    let topics = (symbol_short!("mkt_resolve"), market_id);
+    let topics = (symbol_short!("mkt_res"), market_id);
     env.events().publish(topics, (winning_outcome, oracle.clone(), total_pool));
 }
 
@@ -64,13 +64,13 @@ pub fn winnings_claimed(
 
 /// Emitted when a market is cancelled (all bets refunded)
 pub fn market_cancelled(env: &Env, market_id: u32, cancelled_by: &Address, total_refunded: i128) {
-    let topics = (symbol_short!("mkt_cancel"), market_id);
+    let topics = (symbol_short!("mkt_end"), market_id);
     env.events().publish(topics, (cancelled_by.clone(), total_refunded));
 }
 
 /// Emitted when a bettor's bets are refunded due to market cancellation
 pub fn bets_refunded(env: &Env, market_id: u32, bettor: &Address, amount: i128) {
-    let topics = (symbol_short!("bet_refund"), market_id, bettor.clone());
+    let topics = (symbol_short!("bet_ret"), market_id, bettor.clone());
     env.events().publish(topics, amount);
 }
 
@@ -82,6 +82,6 @@ pub fn market_creation_paused(env: &Env, admin: &Address, paused: bool) {
 
 /// Emitted when the oracle for a market is changed
 pub fn oracle_changed(env: &Env, market_id: u32, old_oracle: &Address, new_oracle: &Address) {
-    let topics = (symbol_short!("oracle_chg"), market_id);
+    let topics = (symbol_short!("ora_chg"), market_id);
     env.events().publish(topics, (old_oracle.clone(), new_oracle.clone()));
 }

@@ -1,13 +1,29 @@
+use soroban_sdk::{contracttype, Address, Bytes};
 use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Vec};
 
 pub const MAX_DEPOSIT_AMOUNT: i128 = 1_000_000_000_000_000;
+/// Re-export of MAX_LOCK_DURATION_SECS for use in tests and public API.
+///
+/// Defined in constants.rs but re-exported here for compatibility with existing
+/// test imports (test code historically imported from types.rs).
+///
+/// **Value**: 157,788,000 seconds = exactly 5 years.
+///
+/// This constant enforces the maximum lock duration across all deposit types
+/// (`deposit`, `deposit_for`, `deposit_by_ledger`, etc.) and is used by
+/// tests to verify boundary conditions at 5 years and 5 years + 1 second.
 pub const MAX_LOCK_DURATION_SECS: u64 = 157_788_000;
 pub const MIN_LOCK_DURATION_SECS: u64 = 60;
 
+// MEV Protection Constants
+pub const MEV_COMMIT_WINDOW_SECS: u64 = 1_800; // 30 minutes for reveal window
 /// Maximum number of tokens allowed in a single multi-token deposit (issue #330).
 pub const MAX_TOKENS_PER_DEPOSIT: u32 = 5;
 /// Emergency withdrawals at or above this cumulative amount in one ledger trip the circuit breaker.
 pub const MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER: i128 = 100_000_000;
+
+/// Maximum duration for a session key (default: 30 days in seconds).
+pub const MAX_SESSION_KEY_DURATION_SECS: u64 = 2_592_000;
 
 /// Current storage schema version. Bump this constant when the on-chain
 /// layout of a `contracttype` struct changes so `migrate()` can detect
@@ -69,6 +85,14 @@ pub enum VaultKey {
     /// Persists the schema version written by the last `migrate()` call (or 1
     /// for contracts that were initialized before versioning was introduced).
     StorageVersion,
+    /// MEV Protection: Stores the commit hash for a (depositor, deposit_id) pair.
+    /// Keyed by (Address, u32) to enable commit-reveal scheme for MEV protection.
+    MevCommit(Address, u32),
+    /// Accumulated staker-pool balance for `token`.
+    /// On `cancel_deposit` 70 % of the penalty is added here; on
+    /// `claim_staker_pool` the full balance for that token is transferred to
+    /// the caller and this key is cleared.
+    StakerPool(Address),
     /// Guards flash-loan execution against re-entrant nested calls.
     FlashLoanGuard,
     /// Active borrower state for a single-token flash loan.
@@ -77,6 +101,8 @@ pub enum VaultKey {
     FlashLoanFeeBalance(Address, Address),
     /// Staker entry: maps staker address to their stake amount
     Staker(Address),
+    /// Registration timestamp for a staker.
+    StakerRegistrationTimestamp(Address),
     /// List of all registered stakers
     StakerList,
     /// Flag to track if a staker is in the StakerList (prevents duplicates)
@@ -87,8 +113,42 @@ pub enum VaultKey {
     RewardsPool,
     /// Rewards claimed by a staker (track cumulative for auditing)
     StakerRewardsClaimed(Address),
+    /// Price samples for MEV detection (TWAP calculation)
+    PriceSamples(Address),
+    /// Insurance claim entry (issue #334)
+    InsuranceClaim(u32),
+    /// Counter for insurance claim IDs (issue #334)
+    ClaimCounter,
+    /// Insurance pool balance per token (issue #334)
+    InsurancePool(Address),
+    /// Session key entry: maps (delegator, session_key_id) to SessionKeyEntry
+    SessionKey(Address, u32),
+    /// Session key counter for a delegator (incremented on each create_session_key)
+    SessionKeyCounter(Address),
+    /// Active session key IDs for a delegator (stores Vec<u32>)
+    ActiveSessionKeyIds(Address),
+    /// Sustainability timing and totals keyed by depositor.
+    SustainabilityMetrics(Address, u32),
+    TotalCarbonFootprint(Address),
+    TotalCarbonOffset(Address),
+    /// Per-depositor bitmap of achieved sustainability milestones (issue #830).
+    ///
+    /// Stores a `u32` where each of the 4 low bits represents one milestone:
+    /// - bit 0: first milestone achieved
+    /// - bit 1: second milestone achieved
+    /// - bit 2: third milestone achieved
+    /// - bit 3: fourth milestone achieved
+    ///
+    /// A bit is set exactly once, the first time the corresponding milestone is
+    /// achieved, and is never cleared. This guarantees each milestone event is
+    /// emitted at most once per depositor (no duplicate emissions).
+    MilestoneAchieved(Address),
     /// NFT evolution record: maps (depositor, deposit_id) to NFTEvolutionRecord
     NFTEvolution(Address, u32),
+    /// Incremented whenever rewards are replenished
+    RewardsPoolGeneration,
+    /// Pool generation claimed by each staker
+    StakerRewardsClaimedGeneration(Address),
 }
 
 #[contracttype]
@@ -131,6 +191,28 @@ pub struct LedgerVaultEntry {
     pub penalty_bps: u32,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SustainabilityMetrics {
+    pub deposit_id: u32,
+    pub depositor: Address,
+    pub carbon_footprint: i128,
+    pub renewable_energy_percent: u32,
+    pub carbon_offset_grams: i128,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SustainabilityReport {
+    pub depositor: Address,
+    pub total_carbon_footprint: i128,
+    pub average_renewable_energy_percent: u32,
+    pub total_carbon_offset: i128,
+    pub active_deposit_count: u32,
+    pub report_timestamp: u64,
+}
+
 /// A single token+amount pair used in multi-token deposits (issue #330).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -166,6 +248,8 @@ pub enum DepositType {
     MultiToken,
 }
 
+pub const MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER: i128 = 1_000_000;
+
 /// Paginated query result for depositor addresses.
 /// (Soroban `#[contracttype]` does not support generics.)
 #[contracttype]
@@ -183,6 +267,69 @@ pub struct Page {
 pub struct StakerEntry {
     pub staker: Address,
     pub stake_amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StakerInfo {
+    pub stake_amount: i128,
+    pub rewards_earned: i128,
+    pub rewards_claimed: i128,
+    pub registration_timestamp: u64,
+}
+
+/// Status of an insurance claim (for issue #334)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClaimStatus {
+    Pending,
+    Approved,
+    Denied,
+}
+
+/// Insurance claim record (for issue #334)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InsuranceClaim {
+    pub claim_id: u32,
+    pub claimant: Address,
+    pub token: Address,
+    pub amount_requested: i128,
+    pub incident_evidence: String,
+    pub status: ClaimStatus,
+}
+
+/// Sponsorship fund configuration and state
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DepositType {
+    /// Timestamp-based (`VaultEntry`) single-token deposit.
+    TimeBased,
+    /// Ledger-sequence-based (`LedgerVaultEntry`) deposit.
+    LedgerBased,
+    /// Multi-token timestamp-based deposit (`MultiTokenVaultEntry`). (issue #330)
+    MultiToken,
+}
+
+/// Session key entry for delegated funding authority.
+/// Allows a delegate to make deposits on behalf of a delegator.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionKeyEntry {
+    /// The delegator who authorized this session key
+    pub delegator: Address,
+    /// The delegate who can use this session key to make deposits
+    pub delegate: Address,
+    /// Maximum amount that can be deposited using this key (0 = unlimited)
+    pub max_amount: i128,
+    /// Expiration timestamp (seconds since epoch)
+    pub expires_at: u64,
+    /// Whether this session key is revoked (permanently disabled)
+    pub is_revoked: bool,
+    /// Total amount already deposited via this session key
+    pub amount_used: i128,
+    /// Timestamp when this session key was created
+    pub created_at: u64,
 }
 
 /// Sponsorship fund configuration and state
@@ -291,4 +438,215 @@ impl PermissionType {
     pub fn mask(self) -> u32 {
         1u32 << (self as u32)
     }
+}
+
+// ----------------------------------------------------------------
+//  Batch Withdrawal
+// ----------------------------------------------------------------
+
+/// Result of withdrawing from a single deposit in a batch operation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawalResult {
+    /// The deposit ID that was attempted to withdraw from.
+    pub deposit_id: u32,
+    /// Whether this withdrawal succeeded (true) or failed (false).
+    pub success: bool,
+    /// Error code if failed (0 = success, non-zero = VaultError code).
+    pub error_code: u32,
+    /// Amount withdrawn if successful, 0 otherwise.
+    pub amount: i128,
+}
+
+/// Aggregated result of a batch withdrawal operation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchWithdrawalResult {
+    /// Individual results for each deposit ID in the batch.
+    pub results: Vec<WithdrawalResult>,
+    /// Total number of deposits attempted.
+    pub total_attempted: u32,
+    /// Number of successful withdrawals.
+    pub successful_count: u32,
+    /// Number of failed withdrawals.
+    pub failed_count: u32,
+    /// Total amount withdrawn across all successful withdrawals.
+    pub total_amount: i128,
+}
+
+// ----------------------------------------------------------------
+//  Sustainability Metrics
+// ----------------------------------------------------------------
+
+/// Environmental impact tracking for a single deposit.
+/// Tracks carbon footprint and renewable energy assumptions.
+///
+/// # Carbon Footprint Methodology
+///
+/// The carbon footprint estimates the energy-related emissions attributable to
+/// a deposit over its lifetime. All carbon values are denominated in
+/// **grams of CO2 equivalent (g CO2e)**.
+///
+/// ## Formula
+///
+/// ```text
+/// carbon_footprint = amount × duration_seconds × CARBON_BASELINE_PER_UNIT_SECOND
+/// ```
+///
+/// Where:
+/// - `amount` — the deposited token amount (in the token's smallest unit).
+/// - `duration_seconds` — the lock duration of the deposit, in seconds.
+/// - `CARBON_BASELINE_PER_UNIT_SECOND` — the carbon baseline, defined as
+///   **1 g CO2e per unit per second**. This is the assumed emissions rate for
+///   one unit of value held for one second.
+///
+/// ## Example
+///
+/// A deposit of `1_000` units locked for `86_400` seconds (1 day):
+///
+/// ```text
+/// carbon_footprint = 1_000 × 86_400 × 1 = 86_400_000 g CO2e
+/// ```
+///
+/// ## Renewable Energy Percentage
+///
+/// `renewable_energy_percent` is a value in the range `0..=100` representing
+/// the share of energy assumed to come from renewable sources for contract
+/// hosting and network operations. The default is **50** (50% renewable).
+///
+/// ## Carbon Offset
+///
+/// Offsets are derived from the penalty basis points applied to the deposit:
+///
+/// ```text
+/// carbon_offset_grams = carbon_footprint × penalty_bps / 10_000
+/// ```
+///
+/// For example, a footprint of `86_400_000 g CO2e` with `penalty_bps = 500`
+/// (5%) yields `86_400_000 × 500 / 10_000 = 4_320_000 g CO2e` offset.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SustainabilityMetrics {
+    /// The deposit ID this metrics entry tracks.
+    pub deposit_id: u32,
+    /// The depositor address.
+    pub depositor: Address,
+    /// Carbon footprint in grams of CO2 equivalent (g CO2e).
+    /// Formula: `amount × duration_seconds × CARBON_BASELINE_PER_UNIT_SECOND`,
+    /// where the baseline is 1 g CO2e per unit per second.
+    pub carbon_footprint: i128,
+    /// Percentage of renewable energy (0-100).
+    /// Represents the energy mix for contract hosting and network operations.
+    /// Default: 50 (50% renewable).
+    pub renewable_energy_percent: u32,
+    /// Carbon offset in grams CO2e based on penalty basis points.
+    /// Formula: `carbon_footprint × penalty_bps / 10_000`
+    pub carbon_offset_grams: i128,
+    /// Timestamp when metrics were recorded.
+    pub timestamp: u64,
+}
+
+/// Aggregated sustainability report for a depositor across all deposits.
+///
+/// # Report Generation Example
+///
+/// Given two active deposits:
+/// - Deposit A: footprint `86_400_000 g CO2e`, offset `4_320_000 g CO2e`, 50% renewable.
+/// - Deposit B: footprint `43_200_000 g CO2e`, offset `2_160_000 g CO2e`, 50% renewable.
+///
+/// The generated report contains:
+/// - `total_carbon_footprint` = `129_600_000 g CO2e`
+/// - `total_carbon_offset` = `6_480_000 g CO2e`
+/// - `average_renewable_energy_percent` = `50`
+/// - `active_deposit_count` = `2`
+/// - `report_timestamp` = the current ledger timestamp at query time.
+///
+/// # Timestamp Accuracy
+///
+/// `report_timestamp` is sourced live from `env.ledger().timestamp()` at the
+/// moment the report is generated. It has second-level precision, is never
+/// cached or reused from a previous query, and therefore reflects the current
+/// query time. Successive report queries may return different timestamps.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SustainabilityReport {
+    /// The depositor address.
+    pub depositor: Address,
+    /// Total carbon footprint across all active deposits (grams CO2e).
+    pub total_carbon_footprint: i128,
+    /// Weighted average renewable energy percentage across deposits (0-100).
+    pub average_renewable_energy_percent: u32,
+    /// Total carbon offset across all deposits (grams CO2e).
+    pub total_carbon_offset: i128,
+    /// Number of active deposits.
+    pub active_deposit_count: u32,
+    /// Timestamp when report was generated, sourced live from
+    /// `env.ledger().timestamp()` at query time (second-level precision,
+    /// never cached).
+    pub report_timestamp: u64,
+}
+
+// ----------------------------------------------------------------
+//  MEV Protection Types
+// ----------------------------------------------------------------
+
+/// MEV commitment hash entry for a deposit.
+/// Stores the private commit data for reveal verification.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MEVCommitment {
+    /// The deposit ID this commitment tracks.
+    pub deposit_id: u32,
+    /// Depositor address.
+    pub depositor: Address,
+    /// Hash of the committed transaction details (Keccak256).
+    pub commit_hash: BytesN<32>,
+    /// Timestamp when the commit was submitted.
+    pub commit_time: u64,
+    /// Timestamp by which the depositor must reveal (commit_time + MEV_REVEAL_WINDOW_SECS).
+    pub reveal_deadline: u64,
+}
+
+/// MEV detection record when sandwich attack is identified.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MEVDetection {
+    /// The deposit ID where MEV was detected.
+    pub deposit_id: u32,
+    /// Depositor address.
+    pub depositor: Address,
+    /// Price deviation in basis points that triggered detection (e.g., 250 = 2.5% deviation).
+    pub deviation_bps: u32,
+    /// Amount of tokens recovered from MEV and added to recovery pool.
+    pub recovery_amount: i128,
+    /// Timestamp when detection occurred.
+    pub detection_time: u64,
+}
+
+/// MEV status for a deposit tracking the protection lifecycle.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MEVStatus {
+    /// No MEV protection has been initiated.
+    Unprotected,
+    /// Commit has been submitted, awaiting reveal.
+    Committed,
+    /// Commit has been revealed and verified.
+    Revealed,
+    /// Sandwich attack detected after reveal.
+    AttackDetected,
+}
+
+/// Price sample for TWAP calculation to detect price manipulation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceSample {
+    /// Token address.
+    pub token: Address,
+    /// Price at sample time.
+    pub price: i128,
+    /// Ledger sequence when sample was recorded.
+    pub ledger_sequence: u32,
+    /// Timestamp when sample was recorded.
+    pub timestamp: u64,
 }

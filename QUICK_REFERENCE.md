@@ -1,158 +1,317 @@
-# Staker Registry - Quick Reference
+# Staging Deployment - Quick Reference Card
 
-## 🎯 What's New
+## 🚀 One-Minute Quick Start
 
-A complete staker registry system with penalty splitting rewards mechanism for SAFE-HAVEN contract.
+### First Time Setup
+```bash
+# 1. Follow setup guide
+cat docs/SETUP_STAGING_SECRETS.md
 
-## 💡 Core Concepts
+# 2. Add GitHub secrets:
+#    STAGING_SOROBAN_SECRET_KEY = secret key from stellar CLI
+#    STAGING_ADMIN_ADDRESS = public address
 
-### Staker Registration
-```rust
-vault.register_staker(&alice, &1000)?;  // Alice stakes 1000 tokens
-vault.register_staker(&alice, &2000)?;  // Alice updates to 2000 tokens
+# 3. Test deployment
+git commit --allow-empty -m "test: trigger deployment"
+git push origin main
+
+# 4. Check GitHub Actions
+# https://github.com/<org>/<repo>/actions
 ```
 
-### Penalty Splitting
-When someone exits early with a penalty:
-- 30% → Fee Recipient (direct transfer)
-- 70% → Staker Rewards Pool (accumulated)
+### Regular Deployment
+```bash
+# Just push to main - it deploys automatically!
+git push origin main
 
-### Reward Distribution
-Stakers claim proportional rewards based on their stake share:
+# Monitor: GitHub Actions → Staging Deployment workflow
 ```
-staker_reward = (staker_stake / total_staked) * rewards_pool
-```
-
-## 📋 New API Functions
-
-### register_staker(staker, amount) → Result<(), VaultError>
-- Register or update staker's stake amount
-- Requires: `amount > 0`
-- Auth: Staker must sign
-- Error: `InvalidStakeAmount`, `Unauthorized`
-
-### claim_staker_rewards(staker) → Result<(), VaultError>
-- Claim accumulated rewards from pool
-- Requires: Staker registered, reward > 0
-- Auth: Staker must sign
-- Error: `StakerNotFound`, `NoRewardsToClaim`, `Unauthorized`
-
-## 📊 Storage Schema
-
-| Key | Type | Purpose |
-|-----|------|---------|
-| Staker(Address) | i128 | Staker's current stake |
-| StakerList | Vec<Address> | All registered stakers |
-| TotalStaked | i128 | Sum of all stakes |
-| RewardsPool | i128 | Accumulated penalty rewards |
-| StakerRewardsClaimed(Address) | i128 | Cumulative rewards claimed |
-
-## 📈 Example Flow
-
-```
-1. Alice registers with 1000 tokens
-   register_staker(&alice, &1000)
-
-2. Bob registers with 3000 tokens
-   register_staker(&bob, &3000)
-   
-3. Carol deposits 100 tokens with 10% penalty (1000 bps)
-   deposit(&carol, &token, &100, &unlock_time, &1000)
-   
-4. Carol cancels early → 10 token penalty
-   cancel_deposit(&carol, &deposit_id)
-   
-5. Penalty split: 3 to fee_recipient, 7 to rewards pool
-   RewardsPool = 7
-
-6. Alice claims (1000/4000 * 7 = 1.75 ≈ 1 token)
-   claim_staker_rewards(&alice)
-   
-7. Bob claims (3000/4000 * 6 = 4.5 ≈ 4 tokens)
-   claim_staker_rewards(&bob)
-```
-
-## 🔍 Error Codes
-
-| Code | Error | When |
-|------|-------|------|
-| 16 | InvalidStakeAmount | Stake amount ≤ 0 |
-| 17 | StakerNotFound | Staker not registered |
-| 18 | NoRewardsToClaim | Pool empty or reward rounds to 0 |
-| 19 | InsufficientStakeAmount | (Reserved for future use) |
-
-## 📡 Events
-
-### StakerRegistered
-- Emitted when staker registers or updates stake
-- Topics: staker address
-- Data: stake amount
-
-### PenaltySplit
-- Emitted when penalty is split on cancel
-- Topics: depositor address
-- Data: total_penalty, fee_recipient_share, stakers_share, deposit_id
-
-### RewardsClaimed
-- Emitted when staker claims rewards
-- Topics: staker address
-- Data: claimed amount
-
-## 🧪 Test Coverage
-
-15 comprehensive tests covering:
-- ✅ Registration (valid/invalid)
-- ✅ Stake updates
-- ✅ Multiple stakers
-- ✅ Reward claiming
-- ✅ Penalty splitting
-- ✅ Proportional distribution
-- ✅ Event emission
-- ✅ Auth enforcement
-- ✅ Edge cases (empty pool, rounding)
-
-## 🔒 Security
-
-- ✅ Auth-first: All mutations require staker signature
-- ✅ Input validation: All amounts checked > 0
-- ✅ TTL management: All storage has proper TTL extension
-- ✅ Integer safety: No arithmetic side effects
-- ✅ Backwards compatible: Old deposits unaffected
-
-## 📚 Documentation
-
-- Full API docs in README.md
-- Implementation details in STAKER_REGISTRY_IMPLEMENTATION.md
-- Verification checklist in IMPLEMENTATION_CHECKLIST.md
-
-## 🚀 Getting Started
-
-1. **Register as staker:**
-   ```
-   register_staker(my_address, 1000)
-   ```
-
-2. **Wait for penalties to accumulate** (from early withdrawals)
-
-3. **Claim your rewards:**
-   ```
-   claim_staker_rewards(my_address)
-   ```
-
-4. **Check your claim history** via rewards_claimed tracking
-
-## ⚙️ Constants
-
-- STAKER_PENALTY_BPS = 7_000 (70%)
-- FEE_RECIPIENT_PENALTY_BPS = 3_000 (30%)
-
-## 🔗 Related Functions
-
-- `cancel_deposit()` - Now splits penalties (modified)
-- `deposit()` - Unchanged (works as before)
-- `withdraw()` - Unchanged (works as before)
-- `initialize()` - Unchanged (works as before)
 
 ---
 
-**More Details:** See README.md, STAKER_REGISTRY_IMPLEMENTATION.md, IMPLEMENTATION_CHECKLIST.md
+## 📊 Deployment Status
+
+### View Recent Deployments
+```bash
+# List last 5 deployments
+gh run list --workflow staging-deploy.yml --limit 5
+
+# View specific deployment
+gh run view <RUN_ID> --log
+
+# Download logs
+gh run download <RUN_ID> --name staging-deployment-log
+```
+
+### Check Contract on Explorer
+```
+https://explorer.stellar.org?resource=contract&resourceCode=<CONTRACT_ID>&network=staging
+```
+
+---
+
+## ✅ Pre-Deployment Checks
+
+These run automatically and must all pass:
+
+| Check | Command | Status |
+|-------|---------|--------|
+| Formatting | `cargo fmt --all -- --check` | Blocks if fail |
+| Linting | `cargo clippy -- -D warnings` | Blocks if fail |
+| Tests | `cargo test --features testutils` | Blocks if fail |
+| Security | `cargo audit` | Blocks if HIGH/CRITICAL |
+| WASM size | Check < 65,536 bytes | Blocks if fail |
+| Changelog | [Unreleased] section | Blocks if empty |
+
+**All must pass before deployment proceeds.**
+
+---
+
+## 🏥 Health Checks
+
+After deployment, these checks must pass:
+
+```
+✓ is_initialized = true
+✓ get_admin = <configured address>
+✓ get_constants = <returns data>
+✓ Response latency < 5 seconds
+```
+
+All 4 must pass for successful deployment.
+
+---
+
+## ⏱️ Deployment Timeline
+
+```
+Pre-deploy checks      ~2 min  (gates deployment)
+Build & optimize WASM  ~4 min  (compile + optimize)
+Deploy to staging      ~2 min  (upload contract)
+Initialize contract    ~1 min  (set admin)
+Health checks          ~1 min  (4 checks)
+Integration tests      ~1 min  (5 tests)
+                       ─────────
+Total                  ~10-15 min
+```
+
+---
+
+## 🔄 Rollback
+
+### Automatic Rollback
+Triggered if health checks fail:
+- Previous deployment identified
+- Previous WASM redeployed
+- Health checks rerun
+- Exit code: 2
+
+### Manual Rollback
+```bash
+gh workflow run staging-rollback.yml \
+  -f reason='<reason>' \
+  -f artifact-timestamp='<timestamp or latest>'
+```
+
+Or manually:
+```bash
+SOROBAN_SECRET_KEY=SB... \
+ADMIN_ADDRESS=G... \
+bash scripts/deploy.sh rollback staging \
+  --artifact-dir deployments/staging/<timestamp>
+```
+
+---
+
+## 📁 Artifacts
+
+Each deployment creates:
+```
+deployments/staging/<YYYYMMDDTHHMMSSZ>/
+├─ manifest.env                # Deployment metadata
+├─ contract-id.txt             # Contract ID
+├─ safe_haven.optimized.wasm   # Deployed binary
+├─ deployment.log              # Full log with timestamps
+└─ health-check-log.txt        # Health check results
+```
+
+**View latest:**
+```bash
+cat deployments/staging/*/manifest.env | tail -10
+```
+
+---
+
+## 🚨 Common Issues & Fixes
+
+### Pre-Deploy Checks Failed
+
+**Formatting:**
+```bash
+cargo fmt --all
+git add -A && git commit -m "chore: format" && git push
+```
+
+**Tests failed:**
+```bash
+cargo test --features testutils
+# Fix issues
+git add -A && git commit -m "fix: tests" && git push
+```
+
+**Security vulnerabilities:**
+```bash
+cargo audit
+cargo update -p <crate>
+git add Cargo.lock && git commit -m "security: update" && git push
+```
+
+### Deployment Failed
+
+**RPC authentication error:**
+- Verify `STAGING_SOROBAN_SECRET_KEY` is set in GitHub Secrets
+- Verify account is funded
+
+**WASM too large:**
+- Review code for bloat
+- Consider splitting contract
+- Check dependencies
+
+**Health check timeout:**
+- Check RPC endpoint availability
+- Try deployment again (may be transient)
+
+---
+
+## 📝 Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [DEPLOYMENT_AUTOMATION.md](DEPLOYMENT_AUTOMATION.md) | Main guide (start here) |
+| [docs/STAGING_DEPLOYMENT.md](docs/STAGING_DEPLOYMENT.md) | Complete reference |
+| [docs/SETUP_STAGING_SECRETS.md](docs/SETUP_STAGING_SECRETS.md) | Secret setup guide |
+| [docs/MONITORING_DASHBOARD.md](docs/MONITORING_DASHBOARD.md) | Health monitoring |
+
+---
+
+## 🔑 GitHub Secrets Required
+
+```
+STAGING_SOROBAN_SECRET_KEY    → Secret key (SB...)
+STAGING_ADMIN_ADDRESS          → Public address (G...)
+STAGING_RPC_URL (optional)     → RPC endpoint
+```
+
+**Set in:** Settings → Secrets and variables → Actions
+
+---
+
+## 📱 Monitor & Alerts
+
+### GitHub Actions Dashboard
+```
+https://github.com/<org>/<repo>/actions/workflows/staging-deploy.yml
+```
+
+### Local Monitoring
+```bash
+# Watch deployments
+watch -n 5 'gh run list --workflow staging-deploy.yml --limit 3'
+
+# View live logs
+gh run view <RUN_ID> --log --tail 50
+
+# Check health
+cat deployments/staging/*/health-check-log.txt
+```
+
+### Contract Health
+```bash
+# Check if contract is live
+stellar contract invoke \
+  --id C... \
+  --source <KEY> \
+  --network staging \
+  -- is_initialized
+```
+
+---
+
+## 🛠️ Useful Commands
+
+### Deploy Manually
+```bash
+SOROBAN_SECRET_KEY=SB... \
+bash scripts/deploy_staging.sh
+```
+
+### Run Integration Tests
+```bash
+STAGING_CONTRACT_ID=C... \
+SOROBAN_SECRET_KEY=SB... \
+bash scripts/integration_tests_staging.sh
+```
+
+### Check Pre-Deploy
+```bash
+bash scripts/pre_deploy_check.sh
+```
+
+### List All Deployments
+```bash
+ls -la deployments/staging/
+```
+
+### View Deployment Info
+```bash
+cat deployments/staging/<timestamp>/manifest.env
+cat deployments/staging/<timestamp>/deployment.log
+cat deployments/staging/<timestamp>/health-check-log.txt
+```
+
+---
+
+## ⚡ Performance Targets
+
+| Metric | Target | Status |
+|--------|--------|--------|
+| Total time | < 15 min | ✓ |
+| Deploy time | < 3 min | ✓ |
+| Health check latency | < 500ms | ✓ |
+| Success rate | > 95% | ✓ |
+| Tests pass rate | 100% | ✓ |
+
+---
+
+## 📞 Emergency Contacts
+
+**Deployment Failed?**
+1. Check GitHub Actions log
+2. Review `deployment.log` in artifacts
+3. See [Troubleshooting](docs/STAGING_DEPLOYMENT.md#troubleshooting)
+
+**Emergency Rollback?**
+```bash
+gh workflow run staging-rollback.yml -f reason='Emergency'
+```
+
+---
+
+## 🎯 Before Going to Production
+
+- [ ] 24+ hours stable operation on staging
+- [ ] Zero critical errors
+- [ ] Health checks consistently passing
+- [ ] Team trained on procedures
+- [ ] Rollback tested and working
+- [ ] Monitoring configured
+- [ ] Alerts set up
+
+---
+
+## 📚 Full Documentation
+
+For complete details, see:
+- [DEPLOYMENT_AUTOMATION.md](DEPLOYMENT_AUTOMATION.md) - Main reference
+- [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) - Technical overview
+

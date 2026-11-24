@@ -1,5 +1,7 @@
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
+use crate::types::LoyaltyTier;
+
 pub fn contract_initialized(
     env: &Env,
     admin: &Address,
@@ -47,6 +49,14 @@ pub fn deposit_by_ledger(
     );
     env.events()
         .publish(topics, (amount, unlock_ledger, deposit_id));
+}
+
+/// Emitted when a depositor reaches a sustainability milestone
+/// (carbon_neutral, high_renewable, carbon_negative, or large_offset).
+/// Emitted at most once per depositor per milestone (tracked via bitmap).
+pub fn sustainability_milestone(env: &Env, depositor: &Address, milestone: &str) {
+    let topics = (Symbol::new(env, "sustainability_milestone"), depositor.clone());
+    env.events().publish(topics, Symbol::new(env, milestone));
 }
 
 /// Emitted when a multi-token deposit is created (issue #330).
@@ -233,6 +243,16 @@ pub fn withdraw_to(
     env.events().publish(topics, (recipient.clone(), amount));
 }
 
+
+pub fn mev_commit_submitted(env: &Env, depositor: &Address, deposit_id: u32) {
+    let topics = (Symbol::new(env, "mev_commit"), depositor.clone());
+    env.events().publish(topics, deposit_id);
+}
+
+pub fn mev_reveal_completed(env: &Env, depositor: &Address, deposit_id: u32) {
+    let topics = (Symbol::new(env, "mev_reveal"), depositor.clone());
+    env.events().publish(topics, deposit_id);
+}
 /// Emitted when the withdrawal whitelist is set for a deposit (issue #331).
 pub fn whitelist_set(
     env: &Env,
@@ -257,6 +277,46 @@ pub fn interest_accrued(
         .publish(topics, (deposit_id, old_amount, new_amount));
 }
 
+
+/// Emitted when a session key is created.
+pub fn session_key_created(
+    env: &Env,
+    delegator: &Address,
+    delegate: &Address,
+    key_id: u32,
+    max_amount: i128,
+    expires_at: u64,
+) {
+    let topics = (Symbol::new(env, "sk_created"), delegator.clone(), delegate.clone());
+    env.events()
+        .publish(topics, (key_id, max_amount, expires_at));
+}
+
+/// Emitted when a session key is revoked.
+pub fn session_key_revoked(
+    env: &Env,
+    delegator: &Address,
+    key_id: u32,
+) {
+    let topics = (Symbol::new(env, "sk_revoked"), delegator.clone());
+    env.events()
+        .publish(topics, key_id);
+}
+
+/// Emitted when a deposit is made using a session key.
+pub fn deposit_with_session_key(
+    env: &Env,
+    depositor: &Address,
+    delegate: &Address,
+    token: &Address,
+    amount: i128,
+    session_key_id: u32,
+    deposit_id: u32,
+) {
+    let topics = (Symbol::new(env, "dep_sk"), delegate.clone(), token.clone());
+    env.events()
+        .publish(topics, (depositor.clone(), amount, session_key_id, deposit_id));
+}
 /// Emitted when a deposit NFT evolves to a new stage.
 pub fn nft_evolved(
     env: &Env,
@@ -269,4 +329,41 @@ pub fn nft_evolved(
     let topics = (Symbol::new(env, "nft_evolved"), depositor.clone());
     env.events()
         .publish(topics, (deposit_id, old_stage, new_stage, rarity));
+}
+
+/// Emitted when a batch withdrawal operation completes.
+/// Tracks the aggregated results of withdrawing from multiple deposits.
+pub fn batch_withdraw(
+    env: &Env,
+    depositor: &Address,
+    successful_count: u32,
+    failed_count: u32,
+    total_amount: i128,
+) {
+    let topics = (Symbol::new(env, "batch_withdraw"), depositor.clone());
+    env.events().publish(
+        topics,
+        (successful_count, failed_count, total_amount),
+    );
+}
+
+/// Emitted when a staker registers or updates their stake.
+pub fn staker_registered(env: &Env, staker: &Address, amount: i128) {
+    let topics = (Symbol::new(env, "StakerRegistered"), staker.clone());
+    env.events()
+        .publish(topics, (amount, env.ledger().timestamp()));
+}
+
+/// Emitted when a staker successfully claims rewards.
+pub fn rewards_claimed(env: &Env, staker: &Address, amount: i128) {
+    let topics = (Symbol::new(env, "RewardsClaimed"), staker.clone());
+    env.events()
+        .publish(topics, (amount, env.ledger().timestamp()));
+}
+
+/// Emitted when a depositor achieves a sustainability milestone
+/// (carbon_neutral, high_renewable, carbon_negative, or large_offset).
+pub fn sustainability_milestone(env: &Env, depositor: &Address, milestone_type: &str) {
+    let topics = (Symbol::new(env, "sustainability"), depositor.clone());
+    env.events().publish(topics, Symbol::new(env, milestone_type));
 }

@@ -2,7 +2,8 @@ import { useState, useMemo } from 'react'
 import { useContractLogs } from '../context/ContractLogsContext'
 import { ContractLogFilters } from '../components/ContractLogFilters'
 import { ContractLogSearch } from '../components/ContractLogSearch'
-import { exportLogsAsJson, exportLogsAsCsv } from '../lib/exportLogs'
+import { exportLogs } from '../lib/exportLogs'
+import type { ExportFormat } from '../lib/exportLogs'
 import { shortAddr } from '../lib/format'
 import type { LogFilters, ContractLogEntry } from '../types/logs'
 
@@ -14,6 +15,10 @@ export function ContractLogsPage() {
   const [filters, setFilters] = useState<LogFilters>({})
   const [searchQuery, setSearchQuery] = useState('')
   const [currentPage, setCurrentPage] = useState(1)
+  const [exportDialogOpen, setExportDialogOpen] = useState(false)
+  const [exportFormat, setExportFormat] = useState<ExportFormat>('csv')
+  const [isExporting, setIsExporting] = useState(false)
+  const [exportError, setExportError] = useState('')
 
   // Apply filters and search
   const filtered = useMemo(() => {
@@ -39,12 +44,18 @@ export function ContractLogsPage() {
     setCurrentPage(1)
   }
 
-  const handleExportJson = () => {
-    exportLogsAsJson(filtered)
-  }
-
-  const handleExportCsv = () => {
-    exportLogsAsCsv(filtered)
+  const handleExport = async (event: React.FormEvent) => {
+    event.preventDefault()
+    setIsExporting(true)
+    setExportError('')
+    try {
+      await exportLogs(filtered, exportFormat)
+      setExportDialogOpen(false)
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : 'The export could not be created.')
+    } finally {
+      setIsExporting(false)
+    }
   }
 
   const handleClearLogs = () => {
@@ -70,24 +81,17 @@ export function ContractLogsPage() {
 
         <div className="flex flex-wrap gap-2">
           <button
-            onClick={() => handleExportJson()}
+            onClick={() => {
+              setExportError('')
+              setExportDialogOpen(true)
+            }}
             disabled={filtered.length === 0}
             className="px-3 py-2 rounded-lg bg-slate-800 text-slate-200 hover:bg-slate-700 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="w-4 h-4">
-              <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5m9-15v7m-4 0v-7" />
+              <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 17v4h14v-4" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
             </svg>
-            JSON
-          </button>
-          <button
-            onClick={() => handleExportCsv()}
-            disabled={filtered.length === 0}
-            className="px-3 py-2 rounded-lg bg-slate-800 text-slate-200 hover:bg-slate-700 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="w-4 h-4">
-              <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5m9-15v7m-4 0v-7" />
-            </svg>
-            CSV
+            Export
           </button>
           <button
             onClick={() => handleClearLogs()}
@@ -98,6 +102,59 @@ export function ContractLogsPage() {
           </button>
         </div>
       </div>
+
+      {exportDialogOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm"
+          role="presentation"
+          onMouseDown={event => {
+            if (event.target === event.currentTarget && !isExporting) setExportDialogOpen(false)
+          }}
+        >
+          <div
+            className="card w-full max-w-md p-6 shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="export-dialog-title"
+          >
+            <h2 id="export-dialog-title" className="text-lg font-semibold text-slate-100">Export contract logs</h2>
+            <p className="mt-1 text-sm text-slate-400">
+              Download all {filtered.length} logs matching the current filters.
+            </p>
+            <form onSubmit={handleExport} className="mt-5 space-y-5">
+              <div>
+                <label htmlFor="export-format" className="label">File format</label>
+                <select
+                  id="export-format"
+                  className="input"
+                  value={exportFormat}
+                  onChange={event => setExportFormat(event.target.value as ExportFormat)}
+                  disabled={isExporting}
+                >
+                  <option value="csv">CSV (.csv)</option>
+                  <option value="json">JSON (.json)</option>
+                  <option value="xml">XML (.xml)</option>
+                  <option value="excel">Excel SpreadsheetML (.xls)</option>
+                </select>
+              </div>
+              {exportError && <p role="alert" className="text-sm text-red-400">{exportError}</p>}
+              <div className="flex justify-end gap-3">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setExportDialogOpen(false)}
+                  disabled={isExporting}
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="btn-primary" disabled={isExporting}>
+                  {isExporting ? 'Preparing…' : 'Download'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Search and Filters */}
       <div className="space-y-4">

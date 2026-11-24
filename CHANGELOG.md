@@ -134,6 +134,8 @@ Include contract redeployment steps, storage migration commands, and frontend up
 
 ### Added
 
+- `withdraw_stake(staker, amount)` — reduces or removes a staker's registered stake and updates `total_staked`
+- Cumulative staker reward claim tracking and a replenishment-generation guard so duplicate claims fail until new rewards enter the pool
 - `deposit_by_ledger(depositor, token, amount, unlock_ledger, penalty_bps)` — locks tokens until a specific Stellar ledger sequence number is reached instead of a wall-clock timestamp; shares the per-depositor deposit-ID counter with timestamp-based deposits (#88)
 - `withdraw_to(depositor, deposit_id, recipient)` — withdraws unlocked tokens to an arbitrary recipient address rather than the depositor; supports both timestamp-based and ledger-based deposits
 - `pause(admin)` / `unpause(admin)` — admin can halt new deposits without affecting existing ones; deposits rejected with `ContractPaused` while paused
@@ -188,6 +190,8 @@ Include contract redeployment steps, storage migration commands, and frontend up
 
 ### Fixed
 
+- `total_staked` is initialized and kept in sync when staker balances are registered, updated, or withdrawn
+- Duplicate staker reward claims are rejected, and the rewards pool is reduced by each successful claim
 - `accept_admin` correctly rejects calls after `cancel_transfer_admin` clears the pending admin (#28, #63)
 - `time_remaining` returns `0` for nonexistent deposits instead of panicking
 - Depositor pagination overflow when `offset + limit` exceeds the depositor list length (#140)

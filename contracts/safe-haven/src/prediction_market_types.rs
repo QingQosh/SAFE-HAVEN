@@ -7,6 +7,10 @@ use soroban_sdk::{contracttype, Address, Vec};
 
 /// Represents a possible outcome in a prediction market.
 /// Markets can have 2-4 outcomes (e.g., "High Deposits", "Medium Deposits", "Low Deposits").
+///
+/// Returned by the `get_market_outcome` query (Issue #96). All fields are
+/// required by that query's acceptance criteria: `outcome_id`, `name`,
+/// `total_bet_amount` and `bettor_count`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketOutcome {
@@ -16,7 +20,7 @@ pub struct MarketOutcome {
     pub name: soroban_sdk::String,
     /// Total amount bet on this outcome (in contract token units)
     pub total_bet_amount: i128,
-    /// Count of bettors for this outcome
+    /// Count of unique bettors for this outcome
     pub bettor_count: u32,
 }
 
@@ -34,7 +38,11 @@ pub enum MarketStatus {
     Cancelled = 3,
 }
 
-/// A single bet placed by a user on a market outcome
+/// A single bet placed by a user on a market outcome.
+///
+/// Returned by the `get_user_bet` query (Issue #97). All fields are required
+/// by that query's acceptance criteria: `bettor`, `market_id`, `outcome_id`,
+/// `amount`, `timestamp` and `claimed`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Bet {
@@ -73,6 +81,8 @@ pub struct PredictionMarket {
     pub description: soroban_sdk::String,
     /// Address of the oracle that will resolve this market
     pub oracle: Address,
+    /// Address of the market creator (authorized to close the market)
+    pub creator: Address,
     /// Unix timestamp when betting closes
     pub close_time: u64,
     /// Unix timestamp when market resolution must complete
@@ -140,6 +150,10 @@ pub struct UserRewards {
 
 /// Constants for prediction market operations
 pub const MIN_MARKET_DURATION_SECS: u64 = 3600; // 1 hour minimum
+/// Minimum number of outcomes a market must define (inclusive)
+pub const MIN_OUTCOME_COUNT: u32 = MIN_OUTCOMES_PER_MARKET;
+/// Maximum number of outcomes a market may define (inclusive)
+pub const MAX_OUTCOME_COUNT: u32 = MAX_OUTCOMES_PER_MARKET;
 pub const MAX_MARKET_DURATION_SECS: u64 = 157_788_000; // 5 years max (same as deposit max)
 pub const MIN_BET_AMOUNT: i128 = 1; // Minimum 1 unit
 pub const MAX_BET_AMOUNT: i128 = 1_000_000_000_000_000; // 10^15 (same as max deposit)
@@ -148,3 +162,26 @@ pub const MIN_OUTCOMES_PER_MARKET: u32 = 2;
 pub const MAX_ORACLE_SUBMISSIONS: u32 = 5; // Prevent spam
 pub const DEFAULT_FEE_BPS: u32 = 100; // 1% default fee
 pub const MAX_FEE_BPS: u32 = 1000; // 10% max fee
+
+/// Combined response for `get_market_with_outcomes` (Issue #100).
+///
+/// Returns a market's full details together with its ordered list of
+/// `MarketOutcome` values. Outcomes are listed by ascending `outcome_id`
+/// (0, 1, 2 … up to `market.outcome_count - 1`), matching the order in
+/// which they were supplied when the market was created.
+///
+/// This type is also the response for `get_prediction_market` (Issue #95):
+/// the embedded `PredictionMarket` carries every market field (market_id,
+/// market_type, description, oracle, close_time, resolution_deadline,
+/// status, winning_outcome, total_pool, bettor_count, outcome_count,
+/// created_at, resolution_data, fee_bps) and `outcomes` supplies the
+/// ordered outcome list, so the query returns complete market data for
+/// every market state (Open, Closed, Resolved, Cancelled).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketWithOutcomes {
+    /// Core market data (status, pool, counts, etc.)
+    pub market: PredictionMarket,
+    /// Ordered outcomes: index 0 == outcome_id 0, index 1 == outcome_id 1 …
+    pub outcomes: Vec<MarketOutcome>,
+}

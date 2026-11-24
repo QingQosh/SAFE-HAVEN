@@ -88,6 +88,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+          components: llvm-tools-preview
 
       - name: Cache cargo registry
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -99,11 +100,77 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Run tests
-        run: cargo test --features testutils
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Run tests with coverage
+        run: |
+          cargo llvm-cov --features testutils \
+            --lcov --output-path lcov.info \
+            --fail-under-lines 80
 
       - name: Run doc tests
         run: cargo test --doc --features testutils
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.sha }}
+          path: lcov.info
+          if-no-files-found: ignore
+
+  # ----------------------------------------------------------------
+  #  Performance Regression Tests
+  # ----------------------------------------------------------------
+  perf:
+    name: Performance Regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-perf-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-perf-
+
+      - name: Run performance benchmarks
+        run: cargo test --features testutils --test perf_regression -- --nocapture
+
+      - name: Compare against baseline
+        env:
+          PERF_BASELINE: tests/perf/baseline.json
+          PERF_CURRENT: target/perf/current.json
+          PERF_MAX_RESPONSE_TIME_REGRESSION: "0.10"
+          PERF_MAX_MEMORY_REGRESSION: "0.15"
+        run: |
+          if [ ! -f "$PERF_CURRENT" ]; then
+            echo "ERROR: performance results not found at $PERF_CURRENT"
+            exit 1
+          fi
+          python3 scripts/check_perf_regression.py \
+            --baseline "$PERF_BASELINE" \
+            --current "$PERF_CURRENT" \
+            --max-response-time-regression "$PERF_MAX_RESPONSE_TIME_REGRESSION" \
+            --max-memory-regression "$PERF_MAX_MEMORY_REGRESSION"
+
+      - name: Upload performance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results-${{ github.sha }}
+          path: target/perf/current.json
+          if-no-files-found: ignore
 
   # ----------------------------------------------------------------
   #  Frontend (TypeScript + Vite build)
@@ -198,156 +265,3 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
-          targets: wasm32-unknown-unknown
-
-      - name: Cache cargo registry
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-wasm-${{ matrix.toolchain }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ${{ runner.os }}-cargo-wasm-${{ matrix.toolchain }}-
-
-      - name: Check WASM target
-        run: cargo check --target wasm32-unknown-unknown
-
-      - name: Build release WASM
-        run: cargo build --target wasm32-unknown-unknown --release
-
-      - name: Cache stellar-cli
-        id: cache-stellar
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: /usr/local/bin/stellar
-          key: stellar-cli-${{ env.STELLAR_CLI_VERSION }}
-
-      - name: Install stellar-cli
-        if: steps.cache-stellar.outputs.cache-hit != 'true'
-        run: |
-          curl -sSL "https://github.com/stellar/stellar-cli/releases/download/v${{ env.STELLAR_CLI_VERSION }}/stellar-cli-v${{ env.STELLAR_CLI_VERSION }}-x86_64-unknown-linux-gnu.tar.gz" \
-            | tar -xz -C /usr/local/bin stellar
-
-      - name: Optimize WASM
-        run: |
-          stellar contract optimize \
-            --wasm target/wasm32-unknown-unknown/release/safe_haven.wasm \
-            --wasm-out target/safe_haven.optimized.wasm
-
-      - name: Check WASM size
-        env:
-          MAX_WASM_BYTES: 65536
-        run: |
-          echo "=== Raw WASM ==="
-          ls -lh target/wasm32-unknown-unknown/release/safe_haven.wasm
-          echo "=== Optimized WASM ==="
-          ls -lh target/safe_haven.optimized.wasm
-          ACTUAL=$(wc -c < target/safe_haven.optimized.wasm)
-          echo "Optimized WASM size: ${ACTUAL} bytes (limit: ${MAX_WASM_BYTES})"
-          if [ "$ACTUAL" -gt "$MAX_WASM_BYTES" ]; then
-            echo "ERROR: WASM too large: ${ACTUAL} bytes exceeds limit of ${MAX_WASM_BYTES} bytes"
-            exit 1
-          fi
-
-      - name: Upload optimized WASM artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: safe-haven-wasm
-          path: target/safe_haven.optimized.wasm
-          retention-days: 7
-
-      - name: Upload WASM as release asset
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@c062c08b532dfe0a29df4baf8fa7d0cd2bdf1ae8 # v2.0.8
-        with:
-          files: target/safe_haven.optimized.wasm
-          name: ${{ github.ref_name }}
-
-  # ----------------------------------------------------------------
-  #  Deploy to Testnet (version tags only)
-  # ----------------------------------------------------------------
-  deploy-testnet:
-    name: Deploy to Testnet
-    runs-on: ubuntu-latest
-    needs: [build]
-    if: startsWith(github.ref, 'refs/tags/v')
-    environment: testnet
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Cache cargo registry
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-wasm-
-
-      - name: Cache stellar-cli
-        id: cache-stellar
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: /usr/local/bin/stellar
-          key: stellar-cli-${{ env.STELLAR_CLI_VERSION }}
-
-      - name: Install stellar-cli
-        if: steps.cache-stellar.outputs.cache-hit != 'true'
-        run: |
-          curl -sSL "https://github.com/stellar/stellar-cli/releases/download/v${{ env.STELLAR_CLI_VERSION }}/stellar-cli-v${{ env.STELLAR_CLI_VERSION }}-x86_64-unknown-linux-gnu.tar.gz" \
-            | tar -xz -C /usr/local/bin stellar
-
-      - name: Deploy to testnet
-        env:
-          SOROBAN_SECRET_KEY: ${{ secrets.SOROBAN_SECRET_KEY }}
-        run: bash scripts/deploy_testnet.sh
-
-      - name: Verify deployed contract responds (is_initialized)
-        env:
-          SOROBAN_SECRET_KEY: ${{ secrets.SOROBAN_SECRET_KEY }}
-        run: |
-          CONTRACT_ID=$(grep "^Contract ID:" deploy_testnet.log | cut -d' ' -f3)
-          if [[ -z "$CONTRACT_ID" ]]; then
-            echo "ERROR: Could not read CONTRACT_ID from deploy_testnet.log"
-            exit 1
-          fi
-          echo "Verifying contract ${CONTRACT_ID} is live and initialized..."
-          RESULT=$(stellar contract invoke \
-            --id "$CONTRACT_ID" \
-            --source "$SOROBAN_SECRET_KEY" \
-            --network testnet \
-            --rpc-url "https://soroban-testnet.stellar.org" \
-            --network-passphrase "Test SDF Network ; September 2015" \
-            -- is_initialized)
-          echo "is_initialized returned: ${RESULT}"
-          if [[ "$RESULT" != "true" ]]; then
-            echo "ERROR: is_initialized returned '${RESULT}', expected 'true'."
-            echo "The contract was uploaded but initialize() may not have completed."
-            exit 1
-          fi
-          echo "✅ Post-deploy verification passed: contract is live and initialized."
-
-      - name: Post contract ID to job summary
-        run: |
-          CONTRACT_ID=$(grep "^Contract ID:" deploy_testnet.log | cut -d' ' -f3)
-          echo "## Testnet Deployment — ${{ github.ref_name }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Contract ID | \`${CONTRACT_ID}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Network | testnet |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Tag | ${{ github.ref_name }} |" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload deploy log artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: deploy-log
-          path: deploy_testnet.log
