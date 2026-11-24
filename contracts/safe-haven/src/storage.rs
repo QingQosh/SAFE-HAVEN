@@ -169,24 +169,28 @@ pub fn get_deposit_ids(env: &Env, depositor: &Address) -> Vec<u32> {
     get_active_ids(env, depositor)
 }
 
-pub fn set_session_key(env: &Env, wallet: &Address, session_key: &Address, expires_at: u64) {
-    let key = VaultKey::SessionKey(wallet.clone(), session_key.clone());
+pub fn set_wallet_session_key(env: &Env, wallet: &Address, session_key: &Address, expires_at: u64) {
+    let key = VaultKey::WalletSessionKey(wallet.clone(), session_key.clone());
     env.storage().persistent().set(&key, &expires_at);
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
-pub fn get_session_key_expiry(env: &Env, wallet: &Address, session_key: &Address) -> Option<u64> {
+pub fn get_wallet_session_key_expiry(
+    env: &Env,
+    wallet: &Address,
+    session_key: &Address,
+) -> Option<u64> {
     env.storage()
         .persistent()
-        .get(&VaultKey::SessionKey(wallet.clone(), session_key.clone()))
+        .get(&VaultKey::WalletSessionKey(wallet.clone(), session_key.clone()))
 }
 
-pub fn remove_session_key(env: &Env, wallet: &Address, session_key: &Address) {
+pub fn remove_wallet_session_key(env: &Env, wallet: &Address, session_key: &Address) {
     env.storage()
         .persistent()
-        .remove(&VaultKey::SessionKey(wallet.clone(), session_key.clone()));
+        .remove(&VaultKey::WalletSessionKey(wallet.clone(), session_key.clone()));
 }
 
 pub fn get_voting_power(env: &Env, voter: &Address) -> i128 {
@@ -1655,6 +1659,10 @@ pub fn get_session_key(env: &Env, delegator: &Address, key_id: u32) -> Option<Se
 pub fn set_session_key(env: &Env, delegator: &Address, key_id: u32, entry: &SessionKeyEntry) {
     let key = VaultKey::SessionKey(delegator.clone(), key_id);
     env.storage().persistent().set(&key, entry);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
 }
 
 // ================================================================

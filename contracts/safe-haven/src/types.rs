@@ -145,6 +145,28 @@ pub enum VaultKey {
     MilestoneAchieved(Address),
     /// NFT evolution record: maps (depositor, deposit_id) to NFTEvolutionRecord
     NFTEvolution(Address, u32),
+    /// Number of stakers stored in the indexed list after the legacy list.
+    StakerCount,
+    /// Staker address at an index after the legacy list.
+    StakerListEntry(u32),
+    /// Sustainability metrics for a deposit (depositor, deposit_id) -> SustainabilityMetrics
+    SustainabilityMetrics(Address, u32),
+    /// Total carbon footprint for a depositor
+    TotalCarbonFootprint(Address),
+    /// Total carbon offset for a depositor
+    TotalCarbonOffset(Address),
+    /// MEV commitment for a deposit (depositor, deposit_id) -> MEVCommitment
+    MEVCommitment(Address, u32),
+    /// MEV status for a deposit (depositor, deposit_id) -> MEVStatus
+    MEVStatus(Address, u32),
+    /// MEV detection list for a deposit (depositor, deposit_id) -> Vec<MEVDetection>
+    MEVDetections(Address, u32),
+    /// MEV recovery pool total
+    MEVRecoveryPool,
+    /// MEV recovery owed to a depositor
+    MEVRecoveryOwed(Address),
+    /// Expiry timestamp for a wallet-authorized session key.
+    WalletSessionKey(Address, Address),
     /// Incremented whenever rewards are replenished
     RewardsPoolGeneration,
     /// Pool generation claimed by each staker
