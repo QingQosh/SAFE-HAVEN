@@ -56,4 +56,7 @@ pub enum PredictionMarketError {
 
     /// `init_prediction_markets` was called on an already-initialized subsystem.
     AlreadyInitialized = 1031,
+
+    /// `init_prediction_markets` was called with an invalid fee basis points value.
+    InvalidFeeBpsInit = 1032,
 }
