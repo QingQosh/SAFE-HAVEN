@@ -19,12 +19,6 @@ pub const BUMP_THRESHOLD: u32 = 518_400;
 pub const BUMP_TARGET: u32 = 37_843_200;
 
 /// Persist a deposit and extend its TTL so it survives the full lock duration.
-///
-/// This is shared by both the time-based (`deposit`) and ledger-based
-/// (`deposit_by_ledger`) entry points. The `Deposit` struct carries whichever
-/// unlock mechanism applies (`unlock_time` or `unlock_ledger`), and both paths
-/// allocate IDs from the same counter so IDs increment monotonically across
-/// both entry points.
 pub fn set_deposit(env: &Env, deposit: &Deposit) {
     let key = DataKey::Deposit(deposit.id);
     env.storage().persistent().set(&key, deposit);
@@ -36,32 +30,6 @@ pub fn set_deposit(env: &Env, deposit: &Deposit) {
 /// Load a deposit, renewing its TTL on read so active entries never expire
 /// prematurely.
 pub fn get_deposit(env: &Env, id: u64) -> Option<Deposit> {
-    let key = DataKey::Deposit(id);
-    if env.storage().persistent().has(&key) {
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
-    }
-    env.storage().persistent().get(&key)
-}
-
-/// Persist a ledger-based deposit and extend its TTL so it survives until the
-/// target ledger is reached.
-///
-/// Ledger-based deposits share the same `DataKey::Deposit(id)` namespace and ID
-/// counter as time-based deposits, so IDs remain unique and monotonic across
-/// both entry points.
-pub fn set_ledger_deposit(env: &Env, deposit: &Deposit) {
-    let key = DataKey::Deposit(deposit.id);
-    env.storage().persistent().set(&key, deposit);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
-}
-
-/// Load a ledger-based deposit, renewing its TTL on read so active entries
-/// never expire prematurely.
-pub fn get_ledger_deposit(env: &Env, id: u64) -> Option<Deposit> {
     let key = DataKey::Deposit(id);
     if env.storage().persistent().has(&key) {
         env.storage()

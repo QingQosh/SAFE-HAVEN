@@ -428,12 +428,11 @@ pub fn claim_winnings(
         return Err(PredictionMarketError::NoWinningBets);
     }
 
-    // Calculate fee: payout_before_fee × (fee_bps / 10000)
-    let fee_u128 = (winnings as u128)
-        .checked_mul(market.fee_bps as u128)
-        .ok_or(PredictionMarketError::InvalidClaimAmount)?
+    // Calculate fee
+    let fee = (winnings as u128)
+        .saturating_mul(market.fee_bps as u128)
         / 10_000;
-    let fee = i128::try_from(fee_u128).map_err(|_| PredictionMarketError::InvalidClaimAmount)?;
+    let fee = fee as i128;
 
     let payout = winnings.saturating_sub(fee);
 
@@ -445,16 +444,11 @@ pub fn claim_winnings(
     let token_client = token::Client::new(env, &token);
     token_client.transfer(&env.current_contract_address(), &bettor, &payout);
 
-    // Transfer fee to fee recipient and accumulate the total
+    // Transfer fee to fee recipient
     if fee > 0 {
         let config = storage::get_market_config(env)
             .ok_or(PredictionMarketError::InternalError)?;
         token_client.transfer(&env.current_contract_address(), &config.fee_recipient, &fee);
-
-        let total_fees = storage::get_total_fees(env).saturating_add(fee);
-        storage::set_total_fees(env, total_fees);
-
-        events::fee_collected(env, market_id, &config.fee_recipient, fee, total_fees);
     }
 
     events::winnings_claimed(env, market_id, &bettor, payout, fee);
@@ -498,8 +492,9 @@ pub fn cancel_market(
     market.status = MarketStatus::Cancelled;
     storage::set_market(env, &market);
 
-    // Refund all bets (iterate through outcomes).
-    // Refunds return the full principal with no fee deduction.
+    let token_client = token::Client::new(env, &token);
+    
+    // Refund all bets (iterate through outcomes)
     let mut total_refunded = 0i128;
     for outcome_id in 0..market.outcome_count {
         if let Some(outcome) = storage::get_outcome_readonly(env, market_id, outcome_id) {
@@ -544,11 +539,6 @@ pub fn set_market_paused(
 /// Get market details
 pub fn get_market_details(env: &Env, market_id: u32) -> Option<PredictionMarket> {
     storage::get_market_readonly(env, market_id)
-}
-
-/// Get the total fees accumulated across all claims
-pub fn get_total_fees(env: &Env) -> i128 {
-    storage::get_total_fees(env)
 }
 
 /// Get outcome details (Issue #96).

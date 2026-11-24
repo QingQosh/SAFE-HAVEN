@@ -52,10 +52,9 @@ pub use prediction_market_errors::PredictionMarketError;
 mod test;
 
 #[cfg(test)]
+#[cfg(test)]
+
+#[cfg(test)]
 mod smart_wallet_tests;
-
-#[cfg(test)]
 mod test_deposit_id_counter;
-
-#[cfg(test)]
 mod prediction_market_test;

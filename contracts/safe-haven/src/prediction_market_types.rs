@@ -158,7 +158,6 @@ pub const MIN_OUTCOMES_PER_MARKET: u32 = 2;
 pub const MAX_ORACLE_SUBMISSIONS: u32 = 5; // Prevent spam
 pub const DEFAULT_FEE_BPS: u32 = 100; // 1% default fee
 pub const MAX_FEE_BPS: u32 = 1000; // 10% max fee
-pub const FEE_BPS_DENOMINATOR: u32 = 10_000; // basis-point denominator for fee math
 
 /// Combined response for `get_market_with_outcomes` (Issue #100).
 ///
