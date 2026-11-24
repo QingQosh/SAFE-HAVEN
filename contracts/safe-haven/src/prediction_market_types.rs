@@ -7,6 +7,10 @@ use soroban_sdk::{contracttype, Address, Vec};
 
 /// Represents a possible outcome in a prediction market.
 /// Markets can have 2-4 outcomes (e.g., "High Deposits", "Medium Deposits", "Low Deposits").
+///
+/// Returned by the `get_market_outcome` query (Issue #96). All fields are
+/// required by that query's acceptance criteria: `outcome_id`, `name`,
+/// `total_bet_amount` and `bettor_count`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketOutcome {
@@ -16,7 +20,7 @@ pub struct MarketOutcome {
     pub name: soroban_sdk::String,
     /// Total amount bet on this outcome (in contract token units)
     pub total_bet_amount: i128,
-    /// Count of bettors for this outcome
+    /// Count of unique bettors for this outcome
     pub bettor_count: u32,
 }
 
@@ -34,7 +38,11 @@ pub enum MarketStatus {
     Cancelled = 3,
 }
 
-/// A single bet placed by a user on a market outcome
+/// A single bet placed by a user on a market outcome.
+///
+/// Returned by the `get_user_bet` query (Issue #97). All fields are required
+/// by that query's acceptance criteria: `bettor`, `market_id`, `outcome_id`,
+/// `amount`, `timestamp` and `claimed`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Bet {
